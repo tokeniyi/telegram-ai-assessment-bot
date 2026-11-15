@@ -12,6 +12,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # provider name -> (default base URL, default model, API key required)
 OPENAI_COMPATIBLE_PROVIDERS: dict[str, tuple[str | None, str | None, bool]] = {
+    # Kilo AI Gateway; "kilo-auto/free" routes each request to a currently free model.
+    "kilo": ("https://api.kilo.ai/api/gateway", "kilo-auto/free", True),
     "openai": (None, "gpt-4o-mini", True),
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.5-flash", True),
     "groq": ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", True),
@@ -22,7 +24,8 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, tuple[str | None, str | None, bool]] = {
     "custom": (None, None, False),
 }
 ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5"
-SUPPORTED_PROVIDERS = ("anthropic", *OPENAI_COMPATIBLE_PROVIDERS)
+DEFAULT_PROVIDER = "kilo"
+SUPPORTED_PROVIDERS = (*OPENAI_COMPATIBLE_PROVIDERS, "anthropic")
 
 
 class ConfigError(Exception):
@@ -99,7 +102,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         except ValueError:
             problems.append(f"ADMIN_IDS has a non-numeric entry: {part!r}")
 
-    provider = _get("AI_PROVIDER", "anthropic").lower()
+    provider = _get("AI_PROVIDER", DEFAULT_PROVIDER).lower()
     api_key = _get("AI_API_KEY")
     model = _get("AI_MODEL")
     base_url = _get("AI_BASE_URL") or None

@@ -43,13 +43,19 @@ Variables set in the real environment take priority over the file.
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | yes | Token from [@BotFather](https://t.me/BotFather) |
 | `ADMIN_IDS` | yes, to upload | Comma-separated Telegram user IDs of the admins |
-| `AI_PROVIDER` | yes | `anthropic`, `openai`, `gemini`, `groq`, `openrouter`, `deepseek`, `mistral`, `ollama` or `custom` |
-| `AI_API_KEY` | yes (not for `ollama`) | API key for that provider |
-| `AI_MODEL` | no | Model name; each provider has a default |
+| `AI_API_KEY` | yes | Your [Kilo](https://kilo.ai) API key |
+| `AI_PROVIDER` | no | Defaults to `kilo`. Others: `anthropic`, `openai`, `gemini`, `groq`, `openrouter`, `deepseek`, `mistral`, `ollama`, `custom` |
+| `AI_MODEL` | no | Defaults to `kilo-auto/free`, Kilo's auto model that routes each request to a free model |
 | `AI_BASE_URL` | only for `custom` | URL of any OpenAI-compatible API |
 
 `.env.example` lists the remaining optional settings (question counts, file size limit,
 whether users see reference answers, resubmission, database path, log level).
+
+**About the free Kilo model:** `kilo-auto/free` costs nothing, but Kilo decides which free model
+answers each request, so question and grading quality can vary between requests, and free models
+are rate limited. Kilo also warns that free providers may log prompts and outputs, so the uploaded
+material and users' answers may be retained by them. To use a specific or paid Kilo model, set
+`AI_MODEL` to its ID from the Kilo model list.
 
 **Finding your admin ID:** start the bot with `ADMIN_IDS` empty, send it `/myid`, put the number in
 `ADMIN_IDS`, and restart.

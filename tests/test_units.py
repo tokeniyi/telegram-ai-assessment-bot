@@ -34,9 +34,15 @@ def test_settings_from_env_file(env_file):
     assert s.ai_model == "gemini-2.5-flash" and "generativelanguage" in s.ai_base_url
 
 
-def test_settings_defaults_to_anthropic(env_file):
+def test_settings_default_to_kilo_free_auto_model(env_file):
     s = load_settings(env_file("TELEGRAM_BOT_TOKEN=1:abc\nAI_API_KEY=k\n"))
-    assert (s.ai_provider, s.ai_model, s.ai_base_url) == ("anthropic", "claude-opus-5-5", None)
+    assert (s.ai_provider, s.ai_model) == ("kilo", "kilo-auto/free")
+    assert s.ai_base_url == "https://api.kilo.ai/api/gateway"
+
+
+def test_settings_anthropic(env_file):
+    s = load_settings(env_file("TELEGRAM_BOT_TOKEN=1:abc\nAI_API_KEY=k\nAI_PROVIDER=anthropic\n"))
+    assert (s.ai_model, s.ai_base_url) == ("claude-opus-5-5", None)
 
 
 def test_settings_report_every_problem(env_file):
