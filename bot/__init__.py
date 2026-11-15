@@ -1,0 +1,1 @@
+"""Telegram AI assessment bot."""
