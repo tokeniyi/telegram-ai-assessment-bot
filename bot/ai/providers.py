@@ -6,10 +6,12 @@ OpenAI chat-completions protocol and is reached through the `openai` SDK.
 
 from __future__ import annotations
 
+import base64
 import logging
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
-from ..config import Settings
+if TYPE_CHECKING:  # config imports the OCR settings, which import this module
+    from ..config import Settings
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +25,10 @@ class AIProvider(Protocol):
     model: str
 
     async def complete(self, system: str, user: str) -> str: ...
+
+    # Optional: providers that can look at images also implement
+    #   async def complete_vision(self, system, user, images: list[bytes], model=None) -> str
+    # where images are JPEG files. Callers check for it with hasattr().
 
 
 class AnthropicProvider:
@@ -44,16 +50,27 @@ class AnthropicProvider:
         self._client = anthropic.AsyncAnthropic(api_key=api_key, timeout=timeout, base_url=base_url)
 
     async def complete(self, system: str, user: str) -> str:
+        return await self._run(system, user, self.model)
+
+    async def complete_vision(self, system: str, user: str, images: list[bytes], model: str | None = None) -> str:
+        content = [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                         "data": base64.b64encode(image).decode()}}
+            for image in images
+        ]
+        return await self._run(system, [*content, {"type": "text", "text": user}], model or self.model)
+
+    async def _run(self, system: str, content, model: str) -> str:
         sdk = self._sdk
         request = dict(
-            model=self.model,
+            model=model,
             max_tokens=32000,
             system=system,
-            messages=[{"role": "user", "content": user}],
+            messages=[{"role": "user", "content": content}],
         )
         try:
             # Streamed so that long generations do not hit HTTP timeouts.
-            if self.model in self._FALLBACK_MODELS:
+            if model in self._FALLBACK_MODELS:
                 stream_cm = self._client.beta.messages.stream(
                     **request, betas=[self._FALLBACK_BETA], fallbacks="default"
                 )
@@ -64,9 +81,9 @@ class AnthropicProvider:
         except sdk.AuthenticationError as exc:
             raise AIError("The AI provider rejected the API key. Check AI_API_KEY in .env.") from exc
         except sdk.PermissionDeniedError as exc:
-            raise AIError(f"The API key is not allowed to use model {self.model}.") from exc
+            raise AIError(f"The API key is not allowed to use model {model}.") from exc
         except sdk.NotFoundError as exc:
-            raise AIError(f"Model {self.model!r} was not found. Check AI_MODEL in .env.") from exc
+            raise AIError(f"Model {model!r} was not found. Check AI_MODEL in .env.") from exc
         except sdk.RateLimitError as exc:
             raise AIError("The AI provider is rate limiting requests. Try again in a minute.") from exc
         except sdk.APIStatusError as exc:
@@ -93,24 +110,35 @@ class OpenAICompatibleProvider:
         self._json_mode = True
 
     async def complete(self, system: str, user: str) -> str:
+        return await self._run(system, user, self.model)
+
+    async def complete_vision(self, system: str, user: str, images: list[bytes], model: str | None = None) -> str:
+        content = [{"type": "text", "text": user}] + [
+            {"type": "image_url",
+             "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(image).decode()}}
+            for image in images
+        ]
+        return await self._run(system, content, model or self.model)
+
+    async def _run(self, system: str, content, model: str) -> str:
         sdk = self._sdk
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
         try:
             try:
-                response = await self._create(messages, json_mode=self._json_mode)
+                response = await self._create(messages, model, json_mode=self._json_mode)
             except sdk.BadRequestError:
                 if not self._json_mode:
                     raise
                 # Some OpenAI-compatible servers do not accept response_format.
                 log.info("%s rejected JSON mode; retrying without it", self.name)
-                response = await self._create(messages, json_mode=False)
+                response = await self._create(messages, model, json_mode=False)
                 self._json_mode = False
         except sdk.AuthenticationError as exc:
             raise AIError("The AI provider rejected the API key. Check AI_API_KEY in .env.") from exc
         except sdk.PermissionDeniedError as exc:
-            raise AIError(f"The API key is not allowed to use model {self.model}.") from exc
+            raise AIError(f"The API key is not allowed to use model {model}.") from exc
         except sdk.NotFoundError as exc:
-            raise AIError(f"Model {self.model!r} was not found. Check AI_MODEL / AI_BASE_URL in .env.") from exc
+            raise AIError(f"Model {model!r} was not found. Check AI_MODEL / AI_BASE_URL in .env.") from exc
         except sdk.RateLimitError as exc:
             raise AIError("The AI provider is rate limiting requests or the quota is used up.") from exc
         except sdk.APIStatusError as exc:
@@ -127,9 +155,9 @@ class OpenAICompatibleProvider:
             raise AIError("The AI provider's content filter blocked this content.")
         return choice.message.content or ""
 
-    async def _create(self, messages: list[dict], json_mode: bool):
+    async def _create(self, messages: list[dict], model: str, json_mode: bool):
         extra = {"response_format": {"type": "json_object"}} if json_mode else {}
-        return await self._client.chat.completions.create(model=self.model, messages=messages, **extra)
+        return await self._client.chat.completions.create(model=model, messages=messages, **extra)
 
 
 def build_provider(settings: Settings) -> AIProvider:

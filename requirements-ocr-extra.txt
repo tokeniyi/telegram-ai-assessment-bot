@@ -1,0 +1,10 @@
+# Optional fallback OCR engines. The bot works without them; an engine that is
+# not installed is skipped. Install with:  pip install -r requirements-ocr-extra.txt
+
+# Tesseract: also needs the program itself (Debian/Ubuntu: apt install tesseract-ocr,
+# plus tesseract-ocr-<lang> packages for other languages; macOS: brew install tesseract).
+pytesseract>=0.3.10
+
+# EasyOCR: pulls in PyTorch (about 2 GB) and downloads its models on first use.
+# Add "easyocr" to OCR_ENGINES in .env to use it. Uncomment to install:
+# easyocr>=1.7
