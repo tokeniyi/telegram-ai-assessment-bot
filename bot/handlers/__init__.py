@@ -1,6 +1,6 @@
 from telegram.ext import Application
 
-from . import admin, common, explain, student, uploads
+from . import admin, chat, common, explain, student, uploads
 
 
 def register_handlers(application: Application) -> None:
@@ -8,4 +8,5 @@ def register_handlers(application: Application) -> None:
     admin.register(application)
     explain.register(application)
     uploads.register(application)
-    student.register(application)  # last: its catch-all text handler must not shadow commands
+    student.register(application)
+    chat.register(application)  # last: its catch-all text handler must not shadow commands

@@ -9,7 +9,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
-    Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters,
+    Application, CallbackQueryHandler, CommandHandler, ContextTypes, filters,
 )
 
 from ..ai import AIError
@@ -24,14 +24,14 @@ MAX_DRAFT_CHARS = 30_000
 
 
 # ── which assessment is the user answering? ──────────────────────────────
-def _open_assessments(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> list[dict[str, Any]]:
+def open_assessments(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> list[dict[str, Any]]:
     svc = services(context)
     return svc.db.open_assessments_for(user_id, include_submitted=svc.settings.allow_resubmission)
 
 
-def _target(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict[str, Any] | None:
+def target_assessment(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict[str, Any] | None:
     """The assessment the user picked with /pending, otherwise the newest open one."""
-    open_ = _open_assessments(context, user_id)
+    open_ = open_assessments(context, user_id)
     chosen = context.user_data.get("target")
     for assessment in open_:
         if assessment["id"] == chosen:
@@ -56,7 +56,7 @@ def assessment_blocks(assessment: dict[str, Any], questions: list[dict[str, Any]
 async def add_to_draft(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     message, user = update.effective_message, update.effective_user
     svc = services(context)
-    assessment = _target(context, user.id)
+    assessment = target_assessment(context, user.id)
     if assessment is None:
         hint = "There is no assessment waiting for your answers right now."
         if svc.settings.is_admin(user.id):
@@ -73,22 +73,29 @@ async def add_to_draft(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
         return
     draft["parts"].append(text)
 
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Submit", callback_data=f"ans:submit:{assessment['id']}"),
-        InlineKeyboardButton("🗑 Discard", callback_data="ans:clear:0"),
-    ]])
     parts = len(draft["parts"])
     await message.reply_text(
         f"Saved as your answer to <b>{esc(assessment['title'])}</b> "
         f"({parts} message{'s' if parts != 1 else ''} so far).\n"
-        "Send more if you are not finished, or tap Submit to have it graded.",
+        "Send more if you are not finished, or tap Submit to have it graded. "
+        "Not an answer? Tap Undo.",
         parse_mode=ParseMode.HTML,
-        reply_markup=keyboard,
+        reply_markup=draft_keyboard(assessment["id"]),
     )
 
 
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await add_to_draft(update, context, update.effective_message.text)
+def draft_keyboard(assessment_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Submit", callback_data=f"ans:submit:{assessment_id}"),
+        InlineKeyboardButton("↩️ Undo", callback_data=f"ans:undo:{assessment_id}"),
+        InlineKeyboardButton("🗑 Discard", callback_data="ans:clear:0"),
+    ]])
+
+
+def draft_parts(context: ContextTypes.DEFAULT_TYPE, assessment_id: int) -> list[str]:
+    """The answer messages saved so far for this assessment (empty if none)."""
+    draft = context.user_data.get("draft")
+    return draft["parts"] if draft and draft["assessment_id"] == assessment_id else []
 
 
 async def on_answer_upload(
@@ -100,7 +107,7 @@ async def on_answer_upload(
     """
     message = update.effective_message
     svc = services(context)
-    if _target(context, update.effective_user.id) is None and is_image(messages[0]) and svc.settings.allow_explain:
+    if target_assessment(context, update.effective_user.id) is None and is_image(messages[0]) and svc.settings.allow_explain:
         await explain.explain_upload(messages, context, question=None)
         return
     document = await read_upload(messages, context)
@@ -169,6 +176,23 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     svc = services(context)
     draft = context.user_data.get("draft")
 
+    if action == "undo":
+        parts = draft["parts"] if draft and draft["assessment_id"] == int(raw_id) else []
+        if not parts:
+            await query.answer("Nothing to undo.", show_alert=True)
+            await query.edit_message_reply_markup(None)
+            return
+        parts.pop()
+        if not parts:
+            context.user_data.pop("draft", None)
+        await query.answer("Removed")
+        await query.edit_message_text(
+            f"↩️ Removed your last message from the answers ({len(parts)} left)."
+            if parts else "↩️ Removed. You have no saved answers now.",
+            reply_markup=draft_keyboard(int(raw_id)) if parts else None,
+        )
+        return
+
     if action == "clear":
         context.user_data.pop("draft", None)
         await query.answer("Discarded")
@@ -184,7 +208,7 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if context.user_data.get("grading"):
         await query.answer("Your previous submission is still being graded.", show_alert=True)
         return
-    if assessment_id not in {a["id"] for a in _open_assessments(context, user.id)}:
+    if assessment_id not in {a["id"] for a in open_assessments(context, user.id)}:
         context.user_data.pop("draft", None)
         await query.answer()
         await query.edit_message_text("This assessment is closed or you have already submitted it.")
@@ -225,7 +249,7 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 # ── commands ─────────────────────────────────────────────────────────────
 async def pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    open_ = _open_assessments(context, update.effective_user.id)
+    open_ = open_assessments(context, update.effective_user.id)
     if not open_:
         await update.effective_message.reply_text("Nothing is waiting for your answers. 🎉")
         return
@@ -242,7 +266,7 @@ async def on_show_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     assessment_id = int(query.data.split(":")[1])
     user = update.effective_user
-    open_ = {a["id"]: a for a in _open_assessments(context, user.id)}
+    open_ = {a["id"]: a for a in open_assessments(context, user.id)}
     await query.answer()
     if assessment_id not in open_:
         await query.edit_message_text("That assessment is closed or you have already submitted it.")
@@ -290,6 +314,5 @@ def register(application: Application) -> None:
     application.add_handler(CommandHandler("pending", pending, filters=PRIVATE))
     application.add_handler(CommandHandler("myresults", my_results, filters=PRIVATE))
     application.add_handler(CommandHandler("cancel", cancel, filters=PRIVATE))
-    application.add_handler(CallbackQueryHandler(on_answer_button, pattern=r"^ans:(submit|clear):\d+$"))
+    application.add_handler(CallbackQueryHandler(on_answer_button, pattern=r"^ans:(submit|undo|clear):\d+$"))
     application.add_handler(CallbackQueryHandler(on_show_button, pattern=r"^show:\d+$"))
-    application.add_handler(MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, on_text))

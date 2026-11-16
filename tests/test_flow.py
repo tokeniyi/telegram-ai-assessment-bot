@@ -36,7 +36,7 @@ async def test_full_flow(harness):
     # the student answers in two messages, then submits
     await h.text(STUDENT_ID, "1. B")
     await h.text(STUDENT_ID, "2) water moving")
-    assert h.tg.last_keyboard(STUDENT_ID) == ["ans:submit:1", "ans:clear:0"]
+    assert h.tg.last_keyboard(STUDENT_ID) == ["ans:submit:1", "ans:undo:1", "ans:clear:0"]
     await h.press(STUDENT_ID, "ans:submit:1")
 
     system, user = h.ai.calls[-1]
@@ -53,8 +53,8 @@ async def test_full_flow(harness):
     assert "&lt;keep going&gt;" in result  # AI text is HTML-escaped
 
     # a second submission is not possible
-    await h.text(STUDENT_ID, "1. A")
-    assert "no assessment waiting" in h.tg.texts(STUDENT_ID)[-1]
+    await h.text(STUDENT_ID, "1. A")  # nothing is open any more, so this is only chat
+    assert "No assessment is open" in h.ai.calls[-1][1] and h.db.get_submission(2) is None
 
     # admin results: summary plus CSV
     await h.text(ADMIN_ID, "/results")
@@ -127,8 +127,9 @@ async def test_regenerate_discard_close_and_pending(harness):
     await h.press(ADMIN_ID, "del:1")
     assert h.db.get_assessment(1) is None
 
-    await h.text(ADMIN_ID, "Some pasted notes")  # no open assessment: explained, not stored
-    assert "Send a PDF" in h.tg.texts(ADMIN_ID)[-1]
+    await h.text(ADMIN_ID, "Some pasted notes")  # no open assessment: it is chat, and is not stored
+    assert "Chat reply to: Some pasted notes" in h.tg.texts(ADMIN_ID)[-1]
+    assert "sending a PDF, DOCX or TXT" in h.ai.calls[-1][1]  # the AI is told how admins create assessments
 
     await h.document(ADMIN_ID, "notes.txt", MATERIAL)
     await h.press(ADMIN_ID, "pub:2")
