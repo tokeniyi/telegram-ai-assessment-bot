@@ -12,7 +12,8 @@ Full notes on what changed and what to know before running it: [docs/DOCUMENTATI
 
 ## Setup
 
-Requires Python 3.10 or newer.
+Requires Python 3.10 or newer and a PostgreSQL database (12 or newer). Create an empty one first,
+for example `createdb assessment_bot`; the bot creates its tables on first start.
 
 ```bash
 python -m venv .venv
@@ -45,6 +46,7 @@ Variables set in the real environment take priority over the file.
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | yes | Token from [@BotFather](https://t.me/BotFather) |
 | `ADMIN_IDS` | yes, to upload | Comma-separated Telegram user IDs of the admins |
+| `DATABASE_URL` | yes | PostgreSQL URL, e.g. `postgresql://user:password@localhost:5432/assessment_bot` |
 | `AI_API_KEY` | yes | Your [Kilo](https://kilo.ai) API key |
 | `AI_PROVIDER` | no | Defaults to `kilo`. Others: `anthropic`, `openai`, `gemini`, `groq`, `openrouter`, `deepseek`, `mistral`, `ollama`, `custom` |
 | `AI_MODEL` | no | Defaults to `kilo-auto/free`, Kilo's auto model that routes each request to a free model |
@@ -105,7 +107,7 @@ them too, so you can test the whole flow from a single account.
 main.py                 entry point
 bot/config.py           reads and validates .env
 bot/app.py              builds the Telegram application
-bot/db.py               SQLite storage (users, assessments, questions, submissions)
+bot/db.py               PostgreSQL storage (users, assessments, questions, submissions)
 bot/extract.py          PDF / DOCX / text extraction for files that have a text layer
 bot/ocr/                OCR pipeline for scanned PDFs and images (see below)
 bot/ai/providers.py     Anthropic and OpenAI-compatible providers
@@ -116,7 +118,7 @@ bot/handlers/           admin, user and shared Telegram handlers; uploads.py rou
 tests/                  offline tests with a fake Telegram API and a fake AI
 ```
 
-Data is stored in `data/bot.db` (SQLite, created on first run). Submissions are saved before
+Data is stored in PostgreSQL (set `DATABASE_URL`; the tables are created on first run). Submissions are saved before
 grading, so an answer is never lost if the AI call fails.
 
 ## OCR: scanned PDFs and photos
@@ -197,7 +199,9 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-The tests run without a bot token, an API key or network access. The OCR tests render pages with
+The tests need a running PostgreSQL server but no bot token, API key or network access. They connect to
+`TEST_DATABASE_URL` (default `postgresql://postgres:postgres@localhost:5432/bot_test`; create that
+database first) and give every test its own temporary schema, which is dropped afterwards. The OCR tests render pages with
 real damage (rotated, tilted, shadowed, blurred, noisy, low resolution, heavily compressed, two
 columns, tables, scanned and mixed PDFs) and check what the pipeline reads from them. Tests for
 Tesseract and EasyOCR run only where those engines are installed.

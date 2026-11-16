@@ -103,3 +103,15 @@ def test_extract_text_formats():
     document.add_paragraph("Photosynthesis converts light into chemical energy.")
     document.save(buffer)
     assert "Photosynthesis" in extract_text("notes.docx", buffer.getvalue())
+
+
+def test_database_url_is_required_and_must_be_postgres(env_file, monkeypatch):
+    base = "TELEGRAM_BOT_TOKEN=1:abc\nADMIN_IDS=5\nAI_PROVIDER=gemini\nAI_API_KEY=k\n"
+    monkeypatch.delenv("DATABASE_URL")
+    with pytest.raises(ConfigError, match="DATABASE_URL"):
+        load_settings(env_file(base))
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///data/bot.db")
+    with pytest.raises(ConfigError, match="DATABASE_URL"):
+        load_settings(env_file(base))
+    monkeypatch.setenv("DATABASE_URL", "postgres://u:p@db:5432/bot")
+    assert load_settings(env_file(base)).database_url == "postgres://u:p@db:5432/bot"
