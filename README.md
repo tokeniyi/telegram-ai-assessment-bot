@@ -8,6 +8,8 @@ A Telegram bot that turns study material into graded assessments:
 4. The bot **stores** the answers, the AI **grades** them, and each user gets a score with feedback.
 5. Admins see the scores in the chat and can download a CSV.
 
+Full notes on what changed and what to know before running it: [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md).
+
 ## Setup
 
 Requires Python 3.10 or newer.
