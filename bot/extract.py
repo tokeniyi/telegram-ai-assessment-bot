@@ -1,4 +1,7 @@
-"""Turn an uploaded file (PDF, DOCX, plain text) into text."""
+"""Turn an uploaded file with a text layer (PDF, DOCX, plain text) into text.
+
+Scanned PDFs and images go through bot.ocr, which calls this module for everything else.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +9,7 @@ import io
 from pathlib import PurePath
 
 TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".csv", ".rtf", ".tex", ".json", ".html", ".htm"}
-SUPPORTED_DESCRIPTION = "PDF, DOCX, TXT or MD"
+SUPPORTED_DESCRIPTION = "PDF, DOCX, TXT or MD file, or a photo"
 
 
 class ExtractionError(Exception):
@@ -26,7 +29,7 @@ def extract_text(filename: str | None, data: bytes, mime_type: str | None = None
     elif suffix in TEXT_EXTENSIONS or mime.startswith("text/"):
         text = _plain(data)
     else:
-        raise ExtractionError(f"Unsupported file type. Send a {SUPPORTED_DESCRIPTION} file.")
+        raise ExtractionError(f"Unsupported file type. Send a {SUPPORTED_DESCRIPTION}.")
 
     text = "\n".join(line.rstrip() for line in text.replace("\x00", "").splitlines()).strip()
     if len(text) < 20:

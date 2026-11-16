@@ -13,15 +13,16 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import Forbidden, RetryAfter, TelegramError
 from telegram.ext import (
-    Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters,
+    Application, CallbackQueryHandler, CommandHandler, ContextTypes, filters,
 )
 
 from ..ai import AIError
-from ..extract import SUPPORTED_DESCRIPTION, ExtractionError, extract_text
+from ..extract import SUPPORTED_DESCRIPTION
 from ..utils import (
     display_name, esc, num, percent, question_blocks, send_blocks, services, total_points,
 )
 from . import student
+from .reading import read_upload
 
 log = logging.getLogger(__name__)
 
@@ -94,33 +95,17 @@ async def _create_draft(
     await _send_preview(context, message.chat_id, assessment_id)
 
 
-async def _material_from_document(message: Message, context: ContextTypes.DEFAULT_TYPE) -> str | None:
-    """Download and read a document; replies with the reason and returns None on failure."""
-    document = message.document
-    max_mb = services(context).settings.max_file_mb
-    if document.file_size and document.file_size > max_mb * 1024 * 1024:
-        await context.bot.send_message(message.chat_id, f"❌ That file is larger than {max_mb} MB.")
-        return None
-    try:
-        file = await document.get_file()
-        data = bytes(await file.download_as_bytearray())
-        return await asyncio.to_thread(extract_text, document.file_name, data, document.mime_type)
-    except ExtractionError as exc:
-        await context.bot.send_message(message.chat_id, f"❌ {exc}")
-    except TelegramError as exc:
-        await context.bot.send_message(message.chat_id, f"❌ Could not download the file: {exc}")
-    return None
-
-
-async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """A file from an admin is study material; from anyone else it is their answers."""
-    if not _is_admin(update, context):
-        await student.on_answer_document(update, context)
+async def on_material(messages: list[Message], context: ContextTypes.DEFAULT_TYPE, caption: str | None) -> None:
+    """An admin sent a file, a photo or an album of photographed pages: draft an assessment from it."""
+    document = await read_upload(messages, context)
+    if document is None:
         return
-    message = update.effective_message
-    material = await _material_from_document(message, context)
-    if material:
-        await _create_draft(message, context, material, message.document.file_name, message.caption)
+    first = messages[0]
+    if first.document:
+        name = first.document.file_name
+    else:
+        name = "photo" if len(messages) == 1 else f"{len(messages)} photos"
+    await _create_draft(first, context, document.text, name, caption)
 
 
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -130,14 +115,15 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     source = message.reply_to_message
     instructions = " ".join(context.args) or None
-    if source and source.document:
-        material = await _material_from_document(source, context)
-        name = source.document.file_name
+    if source and (source.document or source.photo):
+        document = await read_upload([source], context)
+        material = document.text if document else None
+        name = source.document.file_name if source.document else "photo"
     elif source and (source.text or source.caption):
         material, name = source.text or source.caption, "pasted text"
     else:
         await message.reply_text(
-            f"Send a {SUPPORTED_DESCRIPTION} file to generate questions from it.\n"
+            f"Send a {SUPPORTED_DESCRIPTION} to generate questions from it.\n"
             "To use pasted notes instead: send the notes as a message, then reply to that message "
             "with /generate (optionally followed by instructions, e.g. /generate 8 questions, easy)."
         )
@@ -374,7 +360,6 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def register(application: Application) -> None:
-    application.add_handler(MessageHandler(PRIVATE & filters.Document.ALL, on_document))
     application.add_handler(CommandHandler("generate", generate, filters=PRIVATE))
     application.add_handler(CommandHandler("assessments", assessments, filters=PRIVATE))
     application.add_handler(CommandHandler("results", results, filters=PRIVATE))

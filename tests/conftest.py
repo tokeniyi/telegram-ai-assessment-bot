@@ -48,7 +48,29 @@ class FakeProvider:
             raise self.error
         if self.replies:
             return self.replies.pop(0)
-        return json.dumps(GENERATED if system.startswith("You write") else GRADED)
+        if system.startswith("You write"):
+            return json.dumps(GENERATED)
+        if system.startswith("You are a patient tutor"):
+            return json.dumps({"explanation": "It means water moves through a membrane <slowly>."})
+        if system.startswith("You repair text"):
+            return json.dumps({"text": user.split("<ocr>\n", 1)[1].rsplit("\n</ocr>", 1)[0]})  # unchanged
+        return json.dumps(GRADED)
+
+
+class FakeVisionProvider(FakeProvider):
+    """A provider that also accepts images; replies with whatever the test queued."""
+
+    def __init__(self):
+        super().__init__()
+        self.vision_calls = []
+        self.vision_replies = []
+        self.vision_error = None
+
+    async def complete_vision(self, system, user, images, model=None):
+        self.vision_calls.append((system, user, images, model))
+        if self.vision_error:
+            raise self.vision_error
+        return self.vision_replies.pop(0)
 
 
 class FakeTelegram(BaseRequest):
@@ -143,6 +165,32 @@ class Harness:
         fields = {"document": doc}
         if caption:
             fields["caption"] = caption
+        await self._process({"message": self._message(user_id, **fields)})
+
+    async def photo(self, user_id, data, caption=None, album=None, reply_to=None):
+        """A photo message; `data` is the image file. `album` is a media group id."""
+        self._photos = getattr(self, "_photos", 0) + 1
+        file_id = f"photo{self._photos}"
+        self.tg.files[file_id] = data
+        sizes = [{"file_id": "thumb", "file_unique_id": "t", "width": 90, "height": 60, "file_size": 10},
+                 {"file_id": file_id, "file_unique_id": file_id, "width": 1280, "height": 720,
+                  "file_size": len(data)}]
+        fields = {"photo": sizes}
+        if caption:
+            fields["caption"] = caption
+            if caption.startswith("/"):
+                fields["caption_entities"] = [{"type": "bot_command", "offset": 0, "length": len(caption.split()[0])}]
+        if album:
+            fields["media_group_id"] = album
+        message = self._message(user_id, **fields)
+        await self._process({"message": message})
+        return message
+
+    async def reply(self, user_id, text, to):
+        """A text message (usually a command) sent as a reply to an earlier message."""
+        fields = {"text": text, "reply_to_message": to}
+        if text.startswith("/"):
+            fields["entities"] = [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}]
         await self._process({"message": self._message(user_id, **fields)})
 
     async def press(self, user_id, data):

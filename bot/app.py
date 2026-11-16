@@ -12,6 +12,7 @@ from .ai import AssessmentAI, build_provider
 from .config import Settings
 from .db import Database
 from .handlers import register_handlers
+from .ocr import OCRService
 from .utils import Services
 
 log = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ USER_COMMANDS = [
     BotCommand("pending", "Assessments waiting for your answers"),
     BotCommand("myresults", "Your scores"),
     BotCommand("cancel", "Discard the answers typed so far"),
+    BotCommand("explain", "Explain a photo, file or question"),
     BotCommand("help", "Help"),
 ]
 ADMIN_COMMANDS = [
@@ -48,12 +50,15 @@ async def _post_init(application: Application) -> None:
     log.info("Bot @%s is running. AI: %s / %s. Admins: %s",
              me.username, services.settings.ai_provider, services.settings.ai_model,
              sorted(services.settings.admin_ids) or "none")
+    log.info(services.ocr.describe())
+    services.ocr.warm_up()
     if not services.settings.admin_ids:
         log.warning("ADMIN_IDS is empty: nobody can upload material. Send /myid to the bot, "
                     "put the number in ADMIN_IDS in .env and restart.")
 
 
 async def _post_shutdown(application: Application) -> None:
+    application.bot_data["services"].ocr.shutdown()
     application.bot_data["services"].db.close()
 
 
@@ -77,10 +82,13 @@ def build_application(settings: Settings, builder: ApplicationBuilder | None = N
         .post_shutdown(_post_shutdown)
         .build()
     )
+    ai = AssessmentAI(build_provider(settings), settings.default_num_questions, settings.max_questions)
     application.bot_data["services"] = Services(
         settings=settings,
         db=Database(settings.database_path),
-        ai=AssessmentAI(build_provider(settings), settings.default_num_questions, settings.max_questions),
+        ai=ai,
+        # the provider is looked up on every use, so that it can be swapped (tests do)
+        ocr=OCRService(settings.ocr, get_provider=lambda: ai.provider),
     )
     register_handlers(application)
     application.add_error_handler(_on_error)

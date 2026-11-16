@@ -6,15 +6,16 @@ import json
 import logging
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters,
 )
 
 from ..ai import AIError
-from ..extract import ExtractionError, extract_text
 from ..utils import esc, num, percent, question_blocks, send_blocks, services, total_points
+from . import explain
+from .reading import echo_block, is_image, read_upload
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ async def add_to_draft(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
     if assessment is None:
         hint = "There is no assessment waiting for your answers right now."
         if svc.settings.is_admin(user.id):
-            hint += " Send a PDF, DOCX or TXT file to create one."
+            hint += " Send a PDF, DOCX or TXT file, or a photo, to create one."
         await message.reply_text(hint)
         return
 
@@ -90,23 +91,28 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await add_to_draft(update, context, update.effective_message.text)
 
 
-async def on_answer_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """A non-admin sent a file: treat its text as (part of) their answers."""
+async def on_answer_upload(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, messages: list[Message], caption: str | None,
+) -> None:
+    """A non-admin sent a file or photo(s): its text is (part of) their answers.
+
+    With nothing to answer, a picture can only be something they want explained.
+    """
     message = update.effective_message
-    document = message.document
     svc = services(context)
-    if document.file_size and document.file_size > svc.settings.max_file_mb * 1024 * 1024:
-        await message.reply_text(f"That file is larger than {svc.settings.max_file_mb} MB.")
+    if _target(context, update.effective_user.id) is None and is_image(messages[0]) and svc.settings.allow_explain:
+        await explain.explain_upload(messages, context, question=None)
         return
-    file = await document.get_file()
-    data = bytes(await file.download_as_bytearray())
-    try:
-        text = extract_text(document.file_name, data, document.mime_type)
-    except ExtractionError as exc:
-        await message.reply_text(f"❌ {exc}")
+    document = await read_upload(messages, context)
+    if document is None:
         return
-    if message.caption:
-        text = f"{message.caption}\n{text}"
+    if document.used_ocr:  # show what was read, so that a misread answer can be corrected before submitting
+        await context.bot.send_message(
+            message.chat_id,
+            echo_block(document) + "\nIf something is wrong, send the correction as a message before you submit.",
+            parse_mode=ParseMode.HTML,
+        )
+    text = f"{caption}\n{document.text}" if caption else document.text
     await add_to_draft(update, context, text)
 
 

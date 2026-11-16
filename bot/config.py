@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+from .ocr.types import KNOWN_ENGINES, MODES, OCRConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -23,6 +25,12 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, tuple[str | None, str | None, bool]] = {
     "ollama": ("http://localhost:11434/v1", "llama3.1", False),
     "custom": (None, None, False),
 }
+# Free Kilo models that accept images, tried in this order for OCR_VISION when
+# OCR_VISION_MODEL is empty. "kilo-auto/free" itself is not listed with image input.
+KILO_FREE_VISION_MODELS = (
+    "nvidia/nemotron-3.5-super-vl:free,"
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+)
 ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5"
 DEFAULT_PROVIDER = "kilo"
 SUPPORTED_PROVIDERS = (*OPENAI_COMPATIBLE_PROVIDERS, "anthropic")
@@ -49,6 +57,8 @@ class Settings:
     allow_resubmission: bool
     database_path: Path
     log_level: str
+    allow_explain: bool = True
+    ocr: OCRConfig = field(default_factory=OCRConfig)
 
     def is_admin(self, user_id: int | None) -> bool:
         return user_id is not None and user_id in self.admin_ids
@@ -80,6 +90,39 @@ def _bool(name: str, default: bool) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     raise ConfigError(f"{name} must be true or false, got {raw!r}")
+
+
+def _mode(name: str, default: str) -> str:
+    raw = _get(name, default).lower()
+    raw = {"true": "on", "yes": "on", "1": "on", "false": "off", "no": "off", "0": "off"}.get(raw, raw)
+    if raw not in MODES:
+        raise ConfigError(f"{name} must be one of {', '.join(MODES)}, got {raw!r}")
+    return raw
+
+
+def _ocr_config(provider: str) -> OCRConfig:
+    defaults = OCRConfig()
+    engines = tuple(e.strip().lower() for e in _get("OCR_ENGINES", ",".join(defaults.engines)).split(",") if e.strip())
+    unknown = [e for e in engines if e not in KNOWN_ENGINES]
+    if unknown or not engines:
+        raise ConfigError(f"OCR_ENGINES must list one or more of {', '.join(KNOWN_ENGINES)}; got {unknown or 'nothing'}")
+    confidence = _int("OCR_MIN_CONFIDENCE", round(defaults.min_confidence * 100))
+    if confidence > 100:
+        raise ConfigError(f"OCR_MIN_CONFIDENCE is a percentage from 1 to 100, got {confidence}")
+    return OCRConfig(
+        enabled=_bool("OCR_ENABLED", defaults.enabled),
+        engines=engines,
+        workers=_int("OCR_WORKERS", defaults.workers),
+        max_pages=_int("OCR_MAX_PAGES", defaults.max_pages),
+        max_pages_user=_int("OCR_MAX_PAGES_USER", defaults.max_pages_user),
+        dpi=min(max(_int("OCR_DPI", defaults.dpi), 72), 400),
+        min_confidence=confidence / 100,
+        tesseract_langs=_get("OCR_TESSERACT_LANGS", defaults.tesseract_langs),
+        ai_correction=_mode("OCR_AI_CORRECTION", defaults.ai_correction),
+        vision=_mode("OCR_VISION", defaults.vision),
+        vision_model=_get("OCR_VISION_MODEL") or (KILO_FREE_VISION_MODELS if provider == "kilo" else None),
+        vision_max_pages=_int("OCR_VISION_MAX_PAGES", defaults.vision_max_pages),
+    )
 
 
 def load_settings(env_file: Path | None = None) -> Settings:
@@ -153,4 +196,6 @@ def load_settings(env_file: Path | None = None) -> Settings:
         allow_resubmission=_bool("ALLOW_RESUBMISSION", False),
         database_path=database_path,
         log_level=_get("LOG_LEVEL", "INFO").upper(),
+        allow_explain=_bool("ALLOW_EXPLAIN", True),
+        ocr=_ocr_config(provider),
     )

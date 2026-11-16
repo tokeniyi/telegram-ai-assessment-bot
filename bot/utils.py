@@ -15,6 +15,7 @@ from .ai import AssessmentAI
 from .ai.service import LETTERS
 from .config import Settings
 from .db import Database
+from .ocr import OCRService
 
 MESSAGE_LIMIT = 4000  # Telegram's limit is 4096; leave headroom
 
@@ -24,6 +25,7 @@ class Services:
     settings: Settings
     db: Database
     ai: AssessmentAI
+    ocr: OCRService
 
 
 def services(context: ContextTypes.DEFAULT_TYPE) -> Services:
