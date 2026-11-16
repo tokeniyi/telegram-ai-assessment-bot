@@ -159,8 +159,13 @@ pages, and the per-page report (`page`, `source`, `engine`, `confidence`) is wri
 **The AI layer** uses the AI provider you already configured, so it follows that provider's cost and
 privacy terms. It is what reads handwriting, writes formulas as LaTeX and describes diagrams; local
 OCR alone is built for printed text, and returns formulas as plain characters.
-- `OCR_VISION` sends page images to the model. The model must accept images. If yours does not, the
-  bot says so in the report and keeps the local text; set `OCR_VISION_MODEL` to a model that does.
+- `OCR_VISION` sends page images to the model named in `OCR_VISION_MODEL`, which must accept images.
+  With Kilo it defaults to two free vision models, tried in order:
+  `nvidia/nemotron-3.5-super-vl:free`, then `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`
+  (`kilo-auto/free`, which writes the questions, does not take images). With other providers it
+  defaults to `AI_MODEL`. Several models can be listed, separated by commas. If none of them can
+  read a page, the bot says so in the report and keeps the local text. Free models are rate
+  limited, get withdrawn without notice, and their providers may log what is sent to them.
 - `OCR_AI_CORRECTION` repairs recognition errors (`thc m1tochondria` → `the mitochondria`).
 - Both are verified: a transcription that does not contain the words local OCR was sure of is
   discarded, and a correction that rewrites, shortens or extends the text is discarded. A page that

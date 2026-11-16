@@ -145,6 +145,23 @@ async def test_vision_transcription_must_agree_with_confident_ocr():
     assert await lm.read_page(provider, b"jpeg", "", "") == "1. B  2. osmosis"
 
 
+async def test_vision_models_are_tried_in_order_until_one_answers():
+    assert lm.vision_models(None) == [None] and lm.vision_models(" a:free , b ,") == ["a:free", "b"]
+
+    class Flaky(FakeVisionProvider):
+        async def complete_vision(self, system, user, images, model=None):
+            self.vision_calls.append(model)
+            if model == "gone:free":
+                raise AIError("Model 'gone:free' was not found.")
+            return json.dumps({"text": "read by " + model})
+
+    provider = Flaky()
+    assert await lm.read_page(provider, b"jpeg", "", "", model="gone:free, backup:free") == "read by backup:free"
+    assert provider.vision_calls == ["gone:free", "backup:free"]
+    with pytest.raises(AIError, match="not found"):
+        await lm.read_page(provider, b"jpeg", "", "", model="gone:free")
+
+
 def test_supports_vision():
     assert lm.supports_vision(FakeVisionProvider()) and not lm.supports_vision(FakeProvider())
 
@@ -191,6 +208,9 @@ def test_ocr_settings_defaults_and_overrides(env_file):
     defaults = load_settings(env_file("")).ocr
     assert defaults.enabled and defaults.engines == ("rapidocr", "tesseract")
     assert (defaults.vision, defaults.ai_correction, defaults.min_confidence) == ("auto", "auto", 0.8)
+    # Kilo's auto-free model takes no images, so page images go to free vision models instead
+    assert defaults.vision_model.split(",")[0] == "nvidia/nemotron-3.5-super-vl:free"
+    assert load_settings(env_file("AI_PROVIDER=openai\n")).ocr.vision_model is None  # others: AI_MODEL
 
     custom = load_settings(env_file(
         "OCR_ENGINES=tesseract, rapidocr\nOCR_WORKERS=2\nOCR_MIN_CONFIDENCE=90\nOCR_VISION=off\n"

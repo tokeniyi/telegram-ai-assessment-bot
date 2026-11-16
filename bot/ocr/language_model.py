@@ -90,16 +90,32 @@ def stays_close(original: str, corrected: str) -> bool:
     return difflib.SequenceMatcher(None, original, corrected, autojunk=False).ratio() >= 0.8
 
 
+def vision_models(setting: str | None) -> list[str | None]:
+    """The models to try in order. None stands for the provider's own model (AI_MODEL)."""
+    names = [name.strip() for name in (setting or "").split(",") if name.strip()]
+    return names or [None]
+
+
 async def read_page(provider, image: bytes, ocr_draft: str, confident_text: str,
                     model: str | None = None) -> str | None:
     """Transcribe a page image with the vision model. None if it failed the agreement check.
 
-    Raises AIError when the provider call itself fails.
+    `model` may name several models separated by commas; the next one is tried when a
+    request fails (free models come and go and are rate limited).
+    Raises AIError when the request fails for every model.
     """
     user = "Transcribe this page."
     if ocr_draft.strip():
         user += f"\n\nOCR draft (unreliable):\n<ocr>\n{ocr_draft[:CHUNK_CHARS]}\n</ocr>"
-    reply = await provider.complete_vision(VISION_SYSTEM, user, [image], model=model)
+    candidates = vision_models(model)
+    for position, candidate in enumerate(candidates, start=1):
+        try:
+            reply = await provider.complete_vision(VISION_SYSTEM, user, [image], model=candidate)
+            break
+        except AIError as exc:
+            if position == len(candidates):
+                raise
+            log.warning("Vision model %s failed (%s); trying %s", candidate, exc, candidates[position])
     text = _reply_text(reply)
     if text is None:
         log.warning("Vision reply was not usable JSON: %.200s", reply)

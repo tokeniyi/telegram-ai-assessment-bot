@@ -25,6 +25,12 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, tuple[str | None, str | None, bool]] = {
     "ollama": ("http://localhost:11434/v1", "llama3.1", False),
     "custom": (None, None, False),
 }
+# Free Kilo models that accept images, tried in this order for OCR_VISION when
+# OCR_VISION_MODEL is empty. "kilo-auto/free" itself is not listed with image input.
+KILO_FREE_VISION_MODELS = (
+    "nvidia/nemotron-3.5-super-vl:free,"
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+)
 ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5"
 DEFAULT_PROVIDER = "kilo"
 SUPPORTED_PROVIDERS = (*OPENAI_COMPATIBLE_PROVIDERS, "anthropic")
@@ -94,7 +100,7 @@ def _mode(name: str, default: str) -> str:
     return raw
 
 
-def _ocr_config() -> OCRConfig:
+def _ocr_config(provider: str) -> OCRConfig:
     defaults = OCRConfig()
     engines = tuple(e.strip().lower() for e in _get("OCR_ENGINES", ",".join(defaults.engines)).split(",") if e.strip())
     unknown = [e for e in engines if e not in KNOWN_ENGINES]
@@ -114,7 +120,7 @@ def _ocr_config() -> OCRConfig:
         tesseract_langs=_get("OCR_TESSERACT_LANGS", defaults.tesseract_langs),
         ai_correction=_mode("OCR_AI_CORRECTION", defaults.ai_correction),
         vision=_mode("OCR_VISION", defaults.vision),
-        vision_model=_get("OCR_VISION_MODEL") or None,
+        vision_model=_get("OCR_VISION_MODEL") or (KILO_FREE_VISION_MODELS if provider == "kilo" else None),
         vision_max_pages=_int("OCR_VISION_MAX_PAGES", defaults.vision_max_pages),
     )
 
@@ -191,5 +197,5 @@ def load_settings(env_file: Path | None = None) -> Settings:
         database_path=database_path,
         log_level=_get("LOG_LEVEL", "INFO").upper(),
         allow_explain=_bool("ALLOW_EXPLAIN", True),
-        ocr=_ocr_config(),
+        ocr=_ocr_config(provider),
     )

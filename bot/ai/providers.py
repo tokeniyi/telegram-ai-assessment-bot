@@ -118,16 +118,19 @@ class OpenAICompatibleProvider:
              "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(image).decode()}}
             for image in images
         ]
-        return await self._run(system, content, model or self.model)
+        # No response_format here: several vision models reject it, and a rejection must not
+        # switch JSON mode off for the question and grading requests that share this client.
+        return await self._run(system, content, model or self.model, json_mode=False)
 
-    async def _run(self, system: str, content, model: str) -> str:
+    async def _run(self, system: str, content, model: str, json_mode: bool | None = None) -> str:
         sdk = self._sdk
         messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
         try:
             try:
-                response = await self._create(messages, model, json_mode=self._json_mode)
+                response = await self._create(
+                    messages, model, json_mode=self._json_mode if json_mode is None else json_mode)
             except sdk.BadRequestError:
-                if not self._json_mode:
+                if json_mode is not None or not self._json_mode:
                     raise
                 # Some OpenAI-compatible servers do not accept response_format.
                 log.info("%s rejected JSON mode; retrying without it", self.name)
