@@ -1,11 +1,16 @@
 """Offline test doubles: a fake Telegram API and a fake AI provider."""
 
 import json
+import os
 import re
 import time
+import uuid
 from pathlib import Path
+from urllib.parse import quote
 
+import psycopg
 import pytest
+from psycopg import sql
 from telegram import Update
 from telegram.ext import ApplicationBuilder
 from telegram.request import BaseRequest
@@ -138,12 +143,12 @@ class FakeTelegram(BaseRequest):
         return []
 
 
-def make_settings(tmp_path: Path, **overrides) -> Settings:
+def make_settings(database_url: str, **overrides) -> Settings:
     values = dict(
         telegram_bot_token="123:TEST", admin_ids=frozenset({ADMIN_ID}), ai_provider="openai",
         ai_api_key="k", ai_model="m", ai_base_url=None, ai_timeout_seconds=5,
         default_num_questions=5, max_questions=30, max_file_mb=20, max_document_chars=120_000,
-        show_correct_answers=True, allow_resubmission=False, database_path=tmp_path / "bot.db",
+        show_correct_answers=True, allow_resubmission=False, database_url=database_url,
         log_level="INFO",
     )
     values.update(overrides)
@@ -215,14 +220,34 @@ class Harness:
         }})
 
 
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/bot_test"
+)
+
+
 @pytest.fixture
-async def make_harness(tmp_path):
+def pg_url():
+    """A PostgreSQL URL bound to a fresh, private schema that is dropped afterwards."""
+    schema = "t_" + uuid.uuid4().hex[:12]
+    try:
+        admin = psycopg.connect(TEST_DATABASE_URL, autocommit=True)
+    except psycopg.OperationalError as exc:
+        pytest.fail(f"PostgreSQL is required for the tests; set TEST_DATABASE_URL ({exc})")
+    admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    sep = "&" if "?" in TEST_DATABASE_URL else "?"
+    yield f"{TEST_DATABASE_URL}{sep}options={quote('-c search_path=' + schema)}"
+    admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+    admin.close()
+
+
+@pytest.fixture
+async def make_harness(pg_url):
     created = []
 
     async def factory(**overrides):
         telegram = FakeTelegram()
         builder = ApplicationBuilder().request(telegram).get_updates_request(FakeTelegram())
-        application = build_application(make_settings(tmp_path, **overrides), builder)
+        application = build_application(make_settings(pg_url, **overrides), builder)
         provider = FakeProvider()
         application.bot_data["services"].ai.provider = provider
         await application.initialize()
@@ -238,3 +263,9 @@ async def make_harness(tmp_path):
 @pytest.fixture
 async def harness(make_harness):
     return await make_harness()
+
+
+@pytest.fixture(autouse=True)
+def _database_url_env(monkeypatch):
+    """Config tests build Settings from the environment, which must name a database."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost:5432/x")

@@ -85,7 +85,7 @@ def build_application(settings: Settings, builder: ApplicationBuilder | None = N
     ai = AssessmentAI(build_provider(settings), settings.default_num_questions, settings.max_questions)
     application.bot_data["services"] = Services(
         settings=settings,
-        db=Database(settings.database_path),
+        db=Database(settings.database_url),
         ai=ai,
         # the provider is looked up on every use, so that it can be swapped (tests do)
         ocr=OCRService(settings.ocr, get_provider=lambda: ai.provider),

@@ -22,7 +22,7 @@ get a ranking and a CSV.
   saved first, then graded, so an answer is never lost if the AI call fails. `/regrade <id>` retries
   failed grading.
 - **Results:** `/results [id]` shows a ranking and sends a CSV with per-question scores and raw answers.
-- **Storage:** SQLite (`data/bot.db`) with `users`, `assessments`, `questions` and `submissions` tables.
+- **Storage:** PostgreSQL (`DATABASE_URL`) with `users`, `assessments`, `questions` and `submissions` tables.
 - **Providers:** Anthropic plus any OpenAI-compatible API (OpenAI, Gemini, Groq, OpenRouter,
   DeepSeek, Mistral, Ollama, custom). Configured entirely from `.env`.
 - **Default provider:** Kilo AI Gateway with `kilo-auto/free`, so a Kilo API key in `AI_API_KEY` is the

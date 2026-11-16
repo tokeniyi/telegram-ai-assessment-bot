@@ -55,7 +55,7 @@ class Settings:
     max_document_chars: int
     show_correct_answers: bool
     allow_resubmission: bool
-    database_path: Path
+    database_url: str
     log_level: str
     allow_explain: bool = True
     allow_chat: bool = True
@@ -171,15 +171,15 @@ def load_settings(env_file: Path | None = None) -> Settings:
         if not model:
             problems.append(f"AI_MODEL is required when AI_PROVIDER={provider}")
 
+    database_url = _get("DATABASE_URL", "")
+    if not database_url.startswith(("postgresql://", "postgres://")):
+        problems.append("DATABASE_URL is required, e.g. postgresql://user:password@localhost:5432/assessment_bot")
+
     if problems:
         raise ConfigError(
             "Configuration problem(s) in .env:\n  - " + "\n  - ".join(problems)
             + "\nSee .env.example for every setting."
         )
-
-    database_path = Path(_get("DATABASE_PATH", "data/bot.db"))
-    if not database_path.is_absolute():
-        database_path = PROJECT_ROOT / database_path
 
     max_questions = _int("MAX_QUESTIONS", 30)
     return Settings(
@@ -196,7 +196,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         max_document_chars=_int("MAX_DOCUMENT_CHARS", 120_000, minimum=500),
         show_correct_answers=_bool("SHOW_CORRECT_ANSWERS", True),
         allow_resubmission=_bool("ALLOW_RESUBMISSION", False),
-        database_path=database_path,
+        database_url=database_url,
         log_level=_get("LOG_LEVEL", "INFO").upper(),
         allow_explain=_bool("ALLOW_EXPLAIN", True),
         allow_chat=_bool("ALLOW_CHAT", True),
