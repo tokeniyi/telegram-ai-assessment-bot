@@ -58,6 +58,8 @@ class Settings:
     database_path: Path
     log_level: str
     allow_explain: bool = True
+    allow_chat: bool = True
+    chat_history_turns: int = 8
     ocr: OCRConfig = field(default_factory=OCRConfig)
 
     def is_admin(self, user_id: int | None) -> bool:
@@ -197,5 +199,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         database_path=database_path,
         log_level=_get("LOG_LEVEL", "INFO").upper(),
         allow_explain=_bool("ALLOW_EXPLAIN", True),
+        allow_chat=_bool("ALLOW_CHAT", True),
+        chat_history_turns=_int("CHAT_HISTORY_TURNS", 8, minimum=0),
         ocr=_ocr_config(provider),
     )

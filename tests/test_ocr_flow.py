@@ -115,7 +115,7 @@ async def test_student_answers_with_a_photo(harness):
     await h.photo(STUDENT_ID, ANSWERS)
     shown = "\n".join(h.tg.texts(STUDENT_ID))
     assert "This is what I read" in shown and "osmosis" in shown   # they can check it before submitting
-    assert h.tg.last_keyboard(STUDENT_ID) == ["ans:submit:1", "ans:clear:0"]
+    assert h.tg.last_keyboard(STUDENT_ID) == ["ans:submit:1", "ans:undo:1", "ans:clear:0"]
     await h.press(STUDENT_ID, "ans:submit:1")
     submission = h.db.get_submission(1)
     assert submission["status"] == "graded" and "Water moves across a membrane" in submission["raw_text"]

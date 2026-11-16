@@ -1,6 +1,7 @@
 """Offline test doubles: a fake Telegram API and a fake AI provider."""
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -34,6 +35,18 @@ GRADED = {
 }
 
 
+def fake_chat_decision(user):
+    """A stand-in for the chat model: numbered text is an answer, 'done'/'review' asks for review,
+    anything else is conversation. Mirrors what the real prompt asks the model to do."""
+    message = user.split("<message>\n", 1)[1].rsplit("\n</message>", 1)[0]
+    open_ = "Open assessment:" in user
+    if open_ and re.match(r"^\s*\d+\s*[.)]", message):
+        return {"intent": "answer", "reply": ""}
+    if open_ and re.search(r"\b(i'm done|review my answers|grade me)\b", message.lower()):
+        return {"intent": "review", "reply": ""}
+    return {"intent": "chat", "reply": f"Chat reply to: {message} <hi>"}
+
+
 class FakeProvider:
     name, model = "fake", "fake-model"
 
@@ -48,6 +61,8 @@ class FakeProvider:
             raise self.error
         if self.replies:
             return self.replies.pop(0)
+        if system.startswith("You are the chat assistant"):
+            return json.dumps(fake_chat_decision(user))
         if system.startswith("You write"):
             return json.dumps(GENERATED)
         if system.startswith("You are a patient tutor"):

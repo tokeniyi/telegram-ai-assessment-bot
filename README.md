@@ -90,6 +90,11 @@ them too, so you can test the whole flow from a single account.
 - `/explain` — get something explained. Send a photo or file with the caption `/explain` (a question
   can follow, e.g. `/explain why is this negative?`), reply `/explain` to a message, or ask directly:
   `/explain what is osmosis?`. A photo sent while no assessment is open is explained automatically.
+- **Just chat.** Say "hey", ask what a question means, or ask about a topic and the AI answers like an
+  assistant. The AI also tells answers apart from conversation: `1. B` is saved as an answer, and
+  "I'm done, please review my answers" brings up the **Submit** button. If a message is saved by
+  mistake, tap **Undo** under it. It never reveals the reference answers of an open assessment, and it
+  can discuss your latest result. `ALLOW_CHAT=false` turns this off (every typed message is then an answer).
 - `/pending` — open assessments; pick one to answer
 - `/myresults` — scores so far
 - `/cancel` — discard the answers typed so far
@@ -106,7 +111,8 @@ bot/ocr/                OCR pipeline for scanned PDFs and images (see below)
 bot/ai/providers.py     Anthropic and OpenAI-compatible providers
 bot/ai/service.py       prompts, question generation, grading, reply validation
 bot/handlers/           admin, user and shared Telegram handlers; uploads.py routes every file
-                        and photo, reading.py downloads and reads them, explain.py is /explain
+                        and photo, reading.py downloads and reads them, explain.py is /explain,
+                        chat.py routes typed messages (chat, answer or review)
 tests/                  offline tests with a fake Telegram API and a fake AI
 ```
 

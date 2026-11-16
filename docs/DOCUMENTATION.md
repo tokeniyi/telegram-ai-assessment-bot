@@ -28,7 +28,7 @@ get a ranking and a CSV.
 - **Default provider:** Kilo AI Gateway with `kilo-auto/free`, so a Kilo API key in `AI_API_KEY` is the
   only AI setting needed.
 
-### PR #2: OCR, photos and `/explain` (this PR)
+### PR #2: OCR, photos and `/explain` (merged)
 
 **Scanned PDFs and photos** used to be rejected with "needs OCR first". They are now read by a local
 OCR pipeline (`bot/ocr/`) built from free, open-source engines. No paid OCR service, no extra key.
@@ -72,6 +72,38 @@ OCR pipeline (`bot/ocr/`) built from free, open-source engines. No paid OCR serv
   OCR_VISION_MODEL=nvidia/nemotron-3.5-super-vl:free,nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
   ```
 
+### PR #3: conversational chat (this PR)
+
+Before, every typed message from a user with an open assessment was stored as an answer, so "hey"
+or "what does osmosis mean?" ended up in the graded submission. Now users can talk to the bot like
+they would to an AI assistant, and the bot works out what each message is.
+
+**How it works.** Each typed message (private chats, admins included) goes to the AI in one call
+that returns an *intent* and, for conversation, the reply:
+
+| Intent | Meaning | What the bot does |
+|---|---|---|
+| `chat` | Greeting, small talk, a question about a topic, the bot or a question of the assessment, talk about results | Sends the AI's reply. Nothing is stored. |
+| `answer` | Part of the user's answers (`1. B`, a statement answering a question, a continuation) | Saves it to the draft, as before, with **Submit / Undo / Discard** buttons |
+| `review` | "I'm done", "please review my answers", "grade me" | Shows how many messages are saved and a **Submit** button |
+
+- **Review asks for a tap on Submit instead of grading at once.** Submitting is final unless
+  `ALLOW_RESUBMISSION=true`, and a wrong guess about intent should not use up someone's only attempt.
+- **When unsure, the AI is told to pick `answer`.** A wrongly saved message is fixed with the new
+  **Undo** button (removes the last saved message). A wrongly dropped answer would be lost silently.
+- **What the AI knows.** The open assessment's questions (never the reference answers, so it cannot
+  leak them and is told to give hints instead), how many answer messages are saved, the user's latest
+  graded result (reference answers only if `SHOW_CORRECT_ANSWERS=true`, same as the result message),
+  and the last `CHAT_HISTORY_TURNS` exchanges. Users can therefore ask "why did I lose points on Q2?".
+- **Messages are handled one at a time per user**, so answers sent in quick succession are saved in order.
+- **If the AI is unavailable**, text that looks like an answer (`1. B`, `a) ...`) or that follows
+  already saved answers is still saved; anything else gets "could not reach my AI". No answer is lost.
+- **Unchanged:** files and photos from non-admins are still answers; commands, `/explain` and the admin
+  upload flow work as before. Set `ALLOW_CHAT=false` to restore the old behaviour (all text is an answer).
+
+New files: `bot/handlers/chat.py` (routing), `converse()` and `CHAT_SYSTEM` in `bot/ai/service.py`,
+`tests/test_chat.py`. `bot/handlers/student.py` lost its text handler to `chat.py`.
+
 ## 3. Things to know
 
 ### Unverified: the Kilo model IDs
@@ -108,6 +140,21 @@ check that the report does not say the AI could not look at the pages.
 - Memory: about 0.9 GB with the default `OCR_WORKERS=2`, 0.6 GB with 1, 1.5 GB with 4. On a 1 GB
   server use `OCR_WORKERS=1`.
 
+### Chat
+
+- **Cost and limits:** every typed message is one AI request, including "thanks". On the free Kilo
+  model that counts against its rate limit, and free providers may log prompts, so chat text and
+  answers may be retained by them. Set `ALLOW_CHAT=false` to avoid the extra calls.
+- **The classification is a judgement by the model**, so it can be wrong, especially with the free
+  auto model, whose quality varies. That is why wrong answers are undoable and review needs a tap.
+  The classification has only been tested with a scripted stand-in, not with a live model. Try
+  "hey", a question, `1. B`, and "I'm done" on your own bot before relying on it.
+- **A short answer without numbering** (just "Mitochondria") is judged from context; to be safe, number answers.
+- **Memory:** chat history and drafts live in memory and are lost on restart. Only the last
+  `CHAT_HISTORY_TURNS` (8) exchanges are sent to the AI.
+- **The AI is told to give hints, not the reference answers.** That is an instruction to the model,
+  not a guarantee, but the reference answers are never put in the prompt of an open assessment.
+
 ### Limits and behaviour
 - Private chats only; the bot does not post to groups or channels.
 - Answers typed but not yet submitted are held in memory and lost on restart.
@@ -125,10 +172,13 @@ check that the report does not say the AI could not look at the pages.
 | Everyone | `/start`, `/help`, `/myid` | Register, help, show your Telegram ID |
 | User | `/pending`, `/myresults`, `/cancel` | Open assessments, scores, discard typed answers |
 | User | `/explain` | Explain a photo, file, replied message or question |
+| User | *(just type)* | Chat with the AI, send answers, or say you are done to get a Submit button |
 | Admin | `/generate` | Reply to a message, file or photo to use it as material |
 | Admin | `/assessments`, `/results [id]`, `/close <id>`, `/regrade <id>`, `/users` | Manage and review |
 
-## 5. Settings added or changed in this PR
+## 5. Settings
+
+Added by PR #3: `ALLOW_CHAT`, `CHAT_HISTORY_TURNS`. The rest were added by PR #2.
 
 | Setting | Default | Notes |
 |---|---|---|
@@ -144,6 +194,8 @@ check that the report does not say the AI could not look at the pages.
 | `OCR_VISION_MAX_PAGES` | 12 | Page images sent to the AI per file |
 | `OCR_AI_CORRECTION` | `auto` | `off`, `auto` (low-confidence pages), `on` |
 | `ALLOW_EXPLAIN` | `true` | Enables `/explain` |
+| `ALLOW_CHAT` | `true` | `false`: no chat, every typed message is an answer (old behaviour) |
+| `CHAT_HISTORY_TURNS` | 8 | Earlier exchanges the AI remembers per user; 0 for none |
 
 ## 6. Dependencies
 
@@ -163,6 +215,9 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
+`tests/test_chat.py` covers intent routing, mixed chat and answers, review, undo, history limits, answer
+secrecy, AI failure, malformed replies, rapid messages and `ALLOW_CHAT=false`.
+
 Tests run offline with a fake Telegram API and a fake AI, so no token, key or network is needed.
 OCR tests render deliberately damaged pages (rotated, tilted, shadowed, blurred, noisy, low
 resolution, compressed, two-column, tables, scanned and mixed PDFs) and check what is read. Tesseract
@@ -175,4 +230,5 @@ by any test.
 - [ ] `.env` has `TELEGRAM_BOT_TOKEN`, `ADMIN_IDS`, `AI_API_KEY`.
 - [ ] Send a scanned page or photo and confirm the report does not say the AI could not look at the pages.
 - [ ] Decide whether the free-tier privacy terms are acceptable for your material.
-- [ ] Back up `data/bot.db` if you already have data (the schema is unchanged by this PR).
+- [ ] Back up `data/bot.db` if you already have data (the schema is unchanged).
+- [ ] Chat with your bot: "hey", a question about the topic, `1. B`, then "I'm done". Check each is handled correctly.
