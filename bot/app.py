@@ -18,17 +18,17 @@ from .utils import Services
 log = logging.getLogger(__name__)
 
 USER_COMMANDS = [
-    BotCommand("start", "Register and see how the bot works"),
-    BotCommand("pending", "Assessments waiting for your answers"),
-    BotCommand("myresults", "Your scores"),
-    BotCommand("cancel", "Discard the answers typed so far"),
-    BotCommand("explain", "Explain a photo, file or question"),
-    BotCommand("help", "Help"),
+    BotCommand("start", "Welcome and getting started"),
+    BotCommand("pending", "View assessments to complete"),
+    BotCommand("myresults", "View your assessment results"),
+    BotCommand("cancel", "Discard unsent answers"),
+    BotCommand("explain", "Get help with a question or file"),
+    BotCommand("help", "How to use the bot"),
 ]
 ADMIN_COMMANDS = [
     BotCommand("assessments", "List assessments"),
     BotCommand("results", "Scores and CSV export"),
-    BotCommand("generate", "Reply to a text message to use it as material"),
+    BotCommand("generate", "Create questions from replied-to notes"),
     BotCommand("close", "Stop accepting answers for an assessment"),
     BotCommand("regrade", "Retry failed grading"),
     BotCommand("users", "Number of registered users"),

@@ -37,7 +37,7 @@ def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if _is_admin(update, context):
         return True
-    await update.effective_message.reply_text("This command is for administrators only.")
+    await update.effective_message.reply_text("🔒 This command is for administrators only.")
     return False
 
 
@@ -58,7 +58,7 @@ async def _send_preview(context: ContextTypes.DEFAULT_TYPE, chat_id: int, assess
     header = (
         f"📝 <b>Draft #{assessment_id} — {esc(assessment['title'])}</b>\n"
         f"{len(questions)} questions · {num(total_points(questions))} points\n"
-        "Reference answers are shown to you only."
+        "🔒 Reference answers are visible only to administrators. Review before publishing."
     )
     await send_blocks(
         context.bot, chat_id, [header, *question_blocks(questions, with_answers=True)],
@@ -123,7 +123,7 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         material, name = source.text or source.caption, "pasted text"
     else:
         await message.reply_text(
-            f"Send a {SUPPORTED_DESCRIPTION} to generate questions from it.\n"
+            f"📄 Send a {SUPPORTED_DESCRIPTION} to generate questions.\n"
             "To use pasted notes instead: send the notes as a message, then reply to that message "
             "with /generate (optionally followed by instructions, e.g. /generate 8 questions, easy)."
         )
@@ -131,7 +131,7 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not material:
         return
     if len(material.strip()) < 100:
-        await message.reply_text("That text is too short to write questions from.")
+        await message.reply_text("⚠️ There's not enough text to generate useful questions. Please send longer notes.")
         return
     await _create_draft(message, context, material, name, instructions)
 
@@ -156,7 +156,7 @@ async def on_draft_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         svc.db.delete_assessment(assessment_id)
         await query.answer("Discarded")
         await query.edit_message_reply_markup(None)
-        await context.bot.send_message(chat_id, f"🗑 Draft #{assessment_id} discarded.")
+        await context.bot.send_message(chat_id, f"🗑 Draft #{assessment_id} was discarded. No assessment was sent.")
 
     elif action == "regen":
         await query.answer("Regenerating…")
@@ -225,7 +225,7 @@ async def _assessment_from_args(
         latest = [a for a in db.list_assessments() if a["status"] != "draft"]
         if latest:
             return db.get_assessment(latest[0]["id"])
-        await message.reply_text("No assessment has been published yet.")
+        await message.reply_text("📭 No assessment has been published yet. Publish a draft first.")
         return None
     await message.reply_text("Give the assessment number, for example: /close 3  (see /assessments)")
     return None
@@ -236,7 +236,7 @@ async def assessments(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     rows = services(context).db.list_assessments()
     if not rows:
-        await update.effective_message.reply_text("No assessments yet. Send a file to create one.")
+        await update.effective_message.reply_text("📭 No assessments yet. Send a document or photo to create your first draft.")
         return
     icons = {"draft": "✏️", "published": "🟢", "closed": "🔒"}
     lines = ["<b>Assessments</b> (newest first)"]
@@ -260,7 +260,7 @@ async def results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     header = f"📊 <b>#{assessment['id']} — {esc(assessment['title'])}</b> ({assessment['status']})"
     if not rows:
         await update.effective_message.reply_text(
-            f"{header}\nNo submissions yet.", parse_mode=ParseMode.HTML
+            f"{header}\nNo submissions yet. Results will appear once users submit their answers.", parse_mode=ParseMode.HTML
         )
         return
 
@@ -300,7 +300,7 @@ async def results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         update.effective_chat.id,
         document=io.BytesIO(buffer.getvalue().encode("utf-8-sig")),
         filename=f"assessment_{assessment['id']}_results.csv",
-        caption="Full results, including each user's raw answers.",
+        caption="📊 Downloadable results with scores and submitted answers.",
     )
 
 
@@ -331,7 +331,7 @@ async def regrade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     waiting = services(context).db.ungraded_submissions(assessment["id"])
     if not waiting:
-        await message.reply_text("Every submission for this assessment is already graded.")
+        await message.reply_text("✅ All submissions for this assessment have already been graded.")
         return
     await message.reply_text(f"⏳ Grading {len(waiting)} submission(s)…")
     done = 0

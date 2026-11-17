@@ -114,7 +114,7 @@ async def test_student_answers_with_a_photo(harness):
     await publish(h)
     await h.photo(STUDENT_ID, ANSWERS)
     shown = "\n".join(h.tg.texts(STUDENT_ID))
-    assert "This is what I read" in shown and "osmosis" in shown   # they can check it before submitting
+    assert "Text I found in your image" in shown and "osmosis" in shown   # they can check it before submitting
     assert h.tg.last_keyboard(STUDENT_ID) == ["ans:submit:1", "ans:undo:1", "ans:clear:0"]
     await h.press(STUDENT_ID, "ans:submit:1")
     submission = h.db.get_submission(1)
@@ -159,15 +159,15 @@ async def test_explain_command_variants(harness):
     before = len(h.ai.calls)
     h.ai.replies = ["not json", "still not json"]
     await h.text(STUDENT_ID, "/explain what is ATP?")
-    assert len(h.ai.calls) == before + 2 and "could not write an explanation" in h.tg.texts(STUDENT_ID)[-1]
+    assert len(h.ai.calls) == before + 2 and "couldn\'t explain that just now" in h.tg.texts(STUDENT_ID)[-1]
 
 
 async def test_explain_can_be_switched_off(make_harness):
     h = await make_harness(allow_explain=False)
     await h.text(STUDENT_ID, "/explain what is osmosis?")
-    assert "switched off" in h.tg.texts(STUDENT_ID)[-1] and h.ai.calls == []
+    assert "Explanations aren\'t available right now" in h.tg.texts(STUDENT_ID)[-1] and h.ai.calls == []
     await h.photo(STUDENT_ID, NOTES)  # nothing open and no explanations: the usual hint
-    assert "no assessment waiting" in h.tg.texts(STUDENT_ID)[-1] and h.ai.calls == []
+    assert "No assessments are waiting" in h.tg.texts(STUDENT_ID)[-1] and h.ai.calls == []
 
 
 async def test_students_have_a_smaller_page_budget(make_harness):

@@ -11,37 +11,38 @@ from ..utils import services
 PRIVATE = filters.ChatType.PRIVATE
 
 USER_HELP = (
-    "<b>How it works</b>\n"
-    "1. When an assessment is published you receive its questions here.\n"
-    "2. Reply with your answers in any format — numbered, one per line, or a single paragraph. "
-    "You can send several messages, a text/PDF/DOCX file, or photos of handwritten answers.\n"
-    "3. Tap <b>Submit</b>, or just tell me you are done (\"please review my answers\"). "
-    "Your answers are graded and you get your score and feedback.\n\n"
-    "<b>You can also just chat with me.</b> Say hi, ask what a question means, or ask about a topic. "
-    "I work out whether a message is an answer or conversation. If I get it wrong, tap Undo "
-    "under the saved answer.\n\n"
-    "<b>Commands</b>\n"
-    "/pending — assessments waiting for your answers\n"
-    "/myresults — your scores\n"
-    "/cancel — discard the answers you have typed so far\n"
-    "/explain — get something explained: send a photo or file with the caption /explain, reply "
-    "/explain to a message, or ask directly (/explain what is osmosis?)\n"
-    "/myid — show your Telegram ID"
+    "<b>📚 Student guide</b>\n"
+    "When an admin publishes an assessment, its questions will appear in this chat.\n\n"
+    "<b>How to answer</b>\n"
+    "1. Open /pending to find an assessment.\n"
+    "2. Send answers as text, a PDF/DOCX file, or photos of your work. You can send more than one message.\n"
+    "3. Tap <b>✅ Submit</b> when finished to receive your score and feedback.\n\n"
+    "<b>Need help?</b> Ask a question in ordinary language, or use /explain for a photo or file. "
+    "If I accidentally save a chat message as an answer, tap <b>Undo</b>.\n\n"
+    "<b>Useful commands</b>\n"
+    "/pending — View assessments you can answer\n"
+    "/myresults — View your scores and feedback\n"
+    "/cancel — Discard your unsent answers\n"
+    "/explain — Explain a question, photo or document\n"
+    "/myid — Show your Telegram ID"
 )
 
 ADMIN_HELP = (
-    "\n\n<b>Admin</b>\n"
-    "Send a PDF, DOCX or TXT file and I generate questions from it. Scanned PDFs and photos of "
-    "notes work too (send several photos as one album for several pages; send small print as a "
-    "file, not as a compressed photo). Add a caption to steer the "
-    "result, e.g. <i>10 multiple-choice questions on chapter 2, hard</i>. You preview the draft, "
-    "then send it to all users.\n"
-    "/generate — reply with this to a text message to use that text as the material\n"
-    "/assessments — list assessments\n"
-    "/results [id] — scores and CSV export (latest assessment if no id)\n"
-    "/close &lt;id&gt; — stop accepting answers\n"
-    "/regrade &lt;id&gt; — grade submissions whose grading failed\n"
-    "/users — number of registered users"
+    "<b>🛠 Administrator guide</b>\n"
+    "Create an assessment by sending a PDF, DOCX, TXT, scanned document, or photos of notes. "
+    "For multiple pages, send photos in one album. For small print, attach an image as a file.\n\n"
+    "<b>Quick steps</b>\n"
+    "1. Upload your teaching material. Add a caption such as "
+    "<i>10 multiple-choice questions from chapter 2, hard</i> to guide question generation.\n"
+    "2. Review the generated draft and reference answers.\n"
+    "3. Choose <b>Send to all users</b>, <b>Regenerate</b>, or <b>Discard</b>.\n\n"
+    "<b>Admin commands</b>\n"
+    "/generate — Reply to pasted notes to generate questions\n"
+    "/assessments — View drafts and published assessments\n"
+    "/results [id] — View grades and download CSV (latest by default)\n"
+    "/close &lt;id&gt; — Close an assessment to new answers\n"
+    "/regrade &lt;id&gt; — Retry failed grading\n"
+    "/users — Check registered user count"
 )
 
 
@@ -54,24 +55,34 @@ async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     is_admin = services(context).settings.is_admin(update.effective_user.id)
-    greeting = f"👋 Hi {update.effective_user.first_name}! You are registered"
-    greeting += " as an <b>administrator</b>.\n\n" if is_admin else " and will receive assessments here.\n\n"
+    if is_admin:
+        greeting = (
+            f"👋 Welcome, {update.effective_user.first_name}! <b>Administrator access is active.</b>\n"
+            "Start by uploading notes or a document to create an assessment.\n\n"
+        )
+        guide = ADMIN_HELP + "\n\n<b>Also answering assessments?</b> Use /pending or /help."
+    else:
+        greeting = (
+            f"👋 Welcome, {update.effective_user.first_name}! You're ready to receive assessments.\n"
+            "Start with /pending to see if there is one to answer.\n\n"
+        )
+        guide = USER_HELP
     await update.effective_message.reply_text(
-        greeting + USER_HELP + (ADMIN_HELP if is_admin else ""), parse_mode=ParseMode.HTML
+        greeting + guide, parse_mode=ParseMode.HTML
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     is_admin = services(context).settings.is_admin(update.effective_user.id)
     await update.effective_message.reply_text(
-        USER_HELP + (ADMIN_HELP if is_admin else ""), parse_mode=ParseMode.HTML
+        (ADMIN_HELP + "\n\n" + USER_HELP) if is_admin else USER_HELP, parse_mode=ParseMode.HTML
     )
 
 
 async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     note = "You are an administrator." if services(context).settings.is_admin(user_id) else (
-        "To become an administrator, add this number to ADMIN_IDS in the bot's .env file and restart it."
+        "To request administrator access, share this ID with the bot owner. They must add it to the bot configuration."
     )
     await update.effective_message.reply_text(
         f"Your Telegram ID is <code>{user_id}</code>\n{note}", parse_mode=ParseMode.HTML
