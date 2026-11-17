@@ -1,4 +1,9 @@
-"""User side: collect answers, submit them, grade them, show results."""
+"""User side: collect answers, submit them, grade them, show results.
+
+The answers a user has typed so far and the assessment they picked are kept in PostgreSQL
+(see Database.add_draft_part and friends), not in memory, so a restart or redeploy in the
+middle of an assessment loses nothing: the user simply carries on.
+"""
 
 from __future__ import annotations
 
@@ -32,7 +37,7 @@ def open_assessments(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> list[d
 def target_assessment(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict[str, Any] | None:
     """The assessment the user picked with /pending, otherwise the newest open one."""
     open_ = open_assessments(context, user_id)
-    chosen = context.user_data.get("target")
+    chosen = services(context).db.get_target(user_id)
     for assessment in open_:
         if assessment["id"] == chosen:
             return assessment
@@ -64,16 +69,11 @@ async def add_to_draft(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
         await message.reply_text(hint)
         return
 
-    draft = context.user_data.get("draft")
-    if not draft or draft["assessment_id"] != assessment["id"]:
-        draft = {"assessment_id": assessment["id"], "parts": []}
-        context.user_data["draft"] = draft
-    if sum(len(p) for p in draft["parts"]) + len(text) > MAX_DRAFT_CHARS:
+    parts = svc.db.add_draft_part(user.id, assessment["id"], text, MAX_DRAFT_CHARS)
+    if parts is None:
         await message.reply_text("Your answers are too long. Submit what you have, or /cancel and start again.")
         return
-    draft["parts"].append(text)
 
-    parts = len(draft["parts"])
     await message.reply_text(
         f"Saved as your answer to <b>{esc(assessment['title'])}</b> "
         f"({parts} message{'s' if parts != 1 else ''} so far).\n"
@@ -92,10 +92,9 @@ def draft_keyboard(assessment_id: int) -> InlineKeyboardMarkup:
     ]])
 
 
-def draft_parts(context: ContextTypes.DEFAULT_TYPE, assessment_id: int) -> list[str]:
-    """The answer messages saved so far for this assessment (empty if none)."""
-    draft = context.user_data.get("draft")
-    return draft["parts"] if draft and draft["assessment_id"] == assessment_id else []
+def draft_parts(context: ContextTypes.DEFAULT_TYPE, user_id: int, assessment_id: int) -> list[str]:
+    """The answer messages the user has saved so far for this assessment (empty if none)."""
+    return services(context).db.draft_parts(user_id, assessment_id)
 
 
 async def on_answer_upload(
@@ -174,52 +173,46 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     _, action, raw_id = query.data.split(":")
     user = update.effective_user
     svc = services(context)
-    draft = context.user_data.get("draft")
 
     if action == "undo":
-        parts = draft["parts"] if draft and draft["assessment_id"] == int(raw_id) else []
-        if not parts:
+        parts = svc.db.undo_draft_part(user.id, int(raw_id))
+        if parts is None:
             await query.answer("Nothing to undo.", show_alert=True)
             await query.edit_message_reply_markup(None)
             return
-        parts.pop()
-        if not parts:
-            context.user_data.pop("draft", None)
         await query.answer("Removed")
         await query.edit_message_text(
-            f"↩️ Removed your last message from the answers ({len(parts)} left)."
+            f"↩️ Removed your last message from the answers ({parts} left)."
             if parts else "↩️ Removed. You have no saved answers now.",
             reply_markup=draft_keyboard(int(raw_id)) if parts else None,
         )
         return
 
     if action == "clear":
-        context.user_data.pop("draft", None)
+        svc.db.discard_draft(user.id)
         await query.answer("Discarded")
         await query.edit_message_text("Your typed answers were discarded.")
         return
 
     assessment_id = int(raw_id)
-    if not draft or draft["assessment_id"] != assessment_id or not draft["parts"]:
+    # A process-local courtesy only: it stops one bot process grading two of a user's submissions
+    # at once. Whether a submission is created at all is decided by the database below.
+    if context.user_data.get("grading"):
+        await query.answer("Your previous submission is still being graded.", show_alert=True)
+        return
+    outcome, submission_id = svc.db.submit_draft(user.id, assessment_id, svc.settings.allow_resubmission)
+    if outcome == "empty":
         await query.answer("Nothing to submit — these answers were already submitted or discarded.",
                            show_alert=True)
         await query.edit_message_reply_markup(None)
         return
-    if context.user_data.get("grading"):
-        await query.answer("Your previous submission is still being graded.", show_alert=True)
-        return
-    if assessment_id not in {a["id"] for a in open_assessments(context, user.id)}:
-        context.user_data.pop("draft", None)
+    if outcome == "closed":
         await query.answer()
         await query.edit_message_text("This assessment is closed or you have already submitted it.")
         return
 
     context.user_data["grading"] = True
     try:
-        raw_text = "\n".join(draft["parts"])
-        context.user_data.pop("draft", None)
-        context.user_data.pop("target", None)
-        submission_id = svc.db.create_submission(assessment_id, user.id, raw_text)
         await query.answer("Submitted")
         await query.edit_message_text("📥 Answers received. Grading… this can take a moment.")
         await context.bot.send_chat_action(user.id, ChatAction.TYPING)
@@ -271,10 +264,16 @@ async def on_show_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if assessment_id not in open_:
         await query.edit_message_text("That assessment is closed or you have already submitted it.")
         return
-    context.user_data["target"] = assessment_id
-    context.user_data.pop("draft", None)
-    questions = services(context).db.get_questions(assessment_id)
-    await send_blocks(context.bot, user.id, assessment_blocks(open_[assessment_id], questions))
+    db = services(context).db
+    kept = db.choose_assessment(user.id, assessment_id)
+    await send_blocks(context.bot, user.id, assessment_blocks(open_[assessment_id], db.get_questions(assessment_id)))
+    if kept:  # picking the same assessment again resumes it rather than wiping what was saved
+        await context.bot.send_message(
+            user.id,
+            f"📌 You already have {kept} message{'s' if kept != 1 else ''} saved as answers to this "
+            "assessment. Send more, or tap Submit.",
+            reply_markup=draft_keyboard(assessment_id),
+        )
 
 
 async def my_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -293,7 +292,7 @@ async def my_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    had_draft = context.user_data.pop("draft", None)
+    had_draft = services(context).db.discard_draft(update.effective_user.id)
     await update.effective_message.reply_text(
         "Your typed answers were discarded." if had_draft else "There was nothing to discard."
     )

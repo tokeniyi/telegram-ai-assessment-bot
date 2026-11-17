@@ -104,6 +104,42 @@ that returns an *intent* and, for conversation, the reply:
 New files: `bot/handlers/chat.py` (routing), `converse()` and `CHAT_SYSTEM` in `bot/ai/service.py`,
 `tests/test_chat.py`. `bot/handlers/student.py` lost its text handler to `chat.py`.
 
+### PR #7: persistent user sessions
+
+Before, a user's unfinished work lived in the bot's memory (`context.user_data`), so every restart
+or Railway redeploy lost the answers typed so far, the assessment picked with `/pending`, and the
+chat history. Now these are stored in PostgreSQL and the user simply carries on, including tapping a
+**Submit / Undo / Discard** button that the previous version of the bot sent.
+
+| State | Before | Now |
+|---|---|---|
+| Answers typed but not submitted | memory | `draft_answers` table, one row per saved message |
+| Assessment picked with `/pending` | memory | `user_sessions.target_assessment_id` |
+| Chat history | memory | `user_sessions.chat_history` (JSON, trimmed to `CHAT_HISTORY_TURNS`) |
+| "Grading in progress" flag | memory | unchanged, see below |
+| Submissions and grades | PostgreSQL | unchanged |
+
+**Submitting happens exactly once.** `Database.submit_draft` claims the draft by deleting it
+(`DELETE … RETURNING`) and creates the submission in the same transaction. A double tap, a retried
+Telegram update, or two bot versions running side by side during a deploy can therefore create at
+most one submission: the others find the draft already gone and get "already submitted".
+
+**Per-user locking.** Every change to a user's draft or history first locks that user's
+`user_sessions` row, so changes from several processes are applied one after the other. The
+`asyncio.Lock` in `chat.py` stays: it keeps a quick series of messages in order within one process.
+
+**What is deliberately still in memory.** The `grading`, `reading` and `explaining` flags only stop
+one process from starting the same slow job twice for a user; they are not correctness guards, so
+losing them on restart is harmless. A grading interrupted by a restart leaves its submission
+`pending`; `/regrade` retries it. Durable jobs with retries are planned for a later PR.
+
+**One behaviour change.** Tapping an assessment in `/pending` that you already have answers saved
+for keeps them and shows the buttons again (before, it wiped them). Picking a *different*
+assessment still discards the draft, as before: a user has one draft at a time.
+
+The new tables are created on start (`CREATE TABLE IF NOT EXISTS`); existing data is not touched.
+New file: `tests/test_sessions.py` (restart, resume, undo, cancel, switching, exactly-once submit).
+
 ## 3. Things to know
 
 ### Unverified: the Kilo model IDs
@@ -150,14 +186,14 @@ check that the report does not say the AI could not look at the pages.
   The classification has only been tested with a scripted stand-in, not with a live model. Try
   "hey", a question, `1. B`, and "I'm done" on your own bot before relying on it.
 - **A short answer without numbering** (just "Mitochondria") is judged from context; to be safe, number answers.
-- **Memory:** chat history and drafts live in memory and are lost on restart. Only the last
-  `CHAT_HISTORY_TURNS` (8) exchanges are sent to the AI.
+- **History:** chat history and drafts are stored in PostgreSQL and survive restarts. Only the last
+  `CHAT_HISTORY_TURNS` (8) exchanges are kept and sent to the AI.
 - **The AI is told to give hints, not the reference answers.** That is an instruction to the model,
   not a guarantee, but the reference answers are never put in the prompt of an open assessment.
 
 ### Limits and behaviour
 - Private chats only; the bot does not post to groups or channels.
-- Answers typed but not yet submitted are held in memory and lost on restart.
+- Answers typed but not yet submitted are stored in PostgreSQL and survive restarts (PR #7).
 - Material longer than `MAX_DOCUMENT_CHARS` (120000) is cut and the admin is told.
 - Page caps per file: `OCR_MAX_PAGES` (150, admins), `OCR_MAX_PAGES_USER` (15, everyone else).
 - Resubmission is off by default (`ALLOW_RESUBMISSION`); when on, the latest attempt counts.
@@ -215,6 +251,10 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
+`tests/test_sessions.py` covers resuming after a simulated restart (a second application on the same
+database), undo, cancel, switching assessments, and that repeated or concurrent submits create one
+submission.
+
 `tests/test_chat.py` covers intent routing, mixed chat and answers, review, undo, history limits, answer
 secrecy, AI failure, malformed replies, rapid messages and `ALLOW_CHAT=false`.
 
@@ -232,3 +272,5 @@ by any test.
 - [ ] Decide whether the free-tier privacy terms are acceptable for your material.
 - [ ] Back up `data/bot.db` if you already have data (the schema is unchanged).
 - [ ] Chat with your bot: "hey", a question about the topic, `1. B`, then "I'm done". Check each is handled correctly.
+- [ ] After merging PR #7: answer two questions, let Railway redeploy (or restart the service), then
+      send a third answer and tap Submit. The submission should contain all three.

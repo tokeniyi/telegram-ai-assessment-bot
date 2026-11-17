@@ -1,4 +1,6 @@
-"""PostgreSQL storage: users, assessments, questions and graded submissions."""
+"""PostgreSQL storage: users, assessments, questions, graded submissions, and each user's
+unfinished work (the answers typed so far, the chosen assessment and recent chat), so that a
+restart or redeploy does not lose it."""
 
 from __future__ import annotations
 
@@ -51,8 +53,26 @@ CREATE TABLE IF NOT EXISTS submissions (
     created_at     TEXT NOT NULL,
     graded_at      TEXT
 );
+-- One row per user who has talked to the bot. Writes that change a user's unfinished work
+-- lock this row first, which serialises them across every bot process sharing the database.
+CREATE TABLE IF NOT EXISTS user_sessions (
+    user_id               BIGINT PRIMARY KEY,
+    target_assessment_id  BIGINT REFERENCES assessments(id) ON DELETE SET NULL,  -- picked with /pending
+    chat_history          TEXT NOT NULL DEFAULT '[]',   -- JSON list of [role, text], oldest first
+    updated_at            TEXT NOT NULL
+);
+-- The answer messages a user has saved but not submitted. A user has at most one draft at a
+-- time: every row of a user belongs to the same assessment.
+CREATE TABLE IF NOT EXISTS draft_answers (
+    id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id        BIGINT NOT NULL,
+    assessment_id  BIGINT NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+    text           TEXT NOT NULL,
+    created_at     TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_questions_assessment ON questions(assessment_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_lookup ON submissions(assessment_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_draft_answers_user ON draft_answers(user_id, id);
 """
 
 
@@ -236,3 +256,136 @@ class Database:
                WHERE s.user_id = %s ORDER BY s.id DESC LIMIT %s""",
             (user_id, limit),
         )
+
+    # ── unfinished work: sessions and drafts ─────────────────────────────
+    # Every method below that changes a user's draft runs in one transaction that first locks
+    # that user's session row, so two updates for the same user (a double tap, a retried
+    # update, or two bot processes during a deploy) are applied one after the other.
+    @staticmethod
+    def _lock_session(conn, user_id: int) -> None:
+        conn.execute(
+            """INSERT INTO user_sessions (user_id, updated_at) VALUES (%s, %s)
+               ON CONFLICT (user_id) DO UPDATE SET updated_at = EXCLUDED.updated_at""",
+            (user_id, _now()),
+        )
+
+    def get_target(self, user_id: int) -> int | None:
+        row = self._one("SELECT target_assessment_id FROM user_sessions WHERE user_id = %s", (user_id,))
+        return row["target_assessment_id"] if row else None
+
+    def choose_assessment(self, user_id: int, assessment_id: int) -> int:
+        """Make `assessment_id` the one the user is answering.
+
+        A draft for a different assessment is discarded (a user has one draft at a time); a
+        draft for this one is kept. Returns the number of answer messages still saved.
+        """
+        with self._pool.connection() as conn:
+            self._lock_session(conn, user_id)
+            conn.execute("UPDATE user_sessions SET target_assessment_id = %s WHERE user_id = %s",
+                         (assessment_id, user_id))
+            conn.execute("DELETE FROM draft_answers WHERE user_id = %s AND assessment_id != %s",
+                         (user_id, assessment_id))
+            return conn.execute("SELECT COUNT(*) AS n FROM draft_answers WHERE user_id = %s",
+                                (user_id,)).fetchone()["n"]
+
+    def draft_parts(self, user_id: int, assessment_id: int) -> list[str]:
+        """The answer messages saved for this assessment, in the order they were sent."""
+        rows = self._all(
+            "SELECT text FROM draft_answers WHERE user_id = %s AND assessment_id = %s ORDER BY id",
+            (user_id, assessment_id),
+        )
+        return [r["text"] for r in rows]
+
+    def add_draft_part(self, user_id: int, assessment_id: int, text: str, max_chars: int) -> int | None:
+        """Save one more answer message. A draft for another assessment is replaced.
+
+        Returns how many messages the draft now has, or None (nothing saved) if the draft would
+        grow beyond `max_chars`.
+        """
+        with self._pool.connection() as conn:
+            self._lock_session(conn, user_id)
+            conn.execute("DELETE FROM draft_answers WHERE user_id = %s AND assessment_id != %s",
+                         (user_id, assessment_id))
+            row = conn.execute(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(text)), 0) AS chars "
+                "FROM draft_answers WHERE user_id = %s", (user_id,),
+            ).fetchone()
+            if row["chars"] + len(text) > max_chars:
+                return None
+            conn.execute(
+                "INSERT INTO draft_answers (user_id, assessment_id, text, created_at) VALUES (%s, %s, %s, %s)",
+                (user_id, assessment_id, text, _now()),
+            )
+            return row["n"] + 1
+
+    def undo_draft_part(self, user_id: int, assessment_id: int) -> int | None:
+        """Remove the last saved message. Returns how many are left, or None if there was none."""
+        with self._pool.connection() as conn:
+            self._lock_session(conn, user_id)
+            removed = conn.execute(
+                """DELETE FROM draft_answers WHERE id = (
+                       SELECT MAX(id) FROM draft_answers WHERE user_id = %s AND assessment_id = %s)
+                   RETURNING id""",
+                (user_id, assessment_id),
+            ).fetchone()
+            if removed is None:
+                return None
+            return conn.execute("SELECT COUNT(*) AS n FROM draft_answers WHERE user_id = %s",
+                                (user_id,)).fetchone()["n"]
+
+    def discard_draft(self, user_id: int) -> bool:
+        """Delete the user's draft. Returns whether there was one."""
+        with self._pool.connection() as conn:
+            self._lock_session(conn, user_id)
+            return conn.execute("DELETE FROM draft_answers WHERE user_id = %s", (user_id,)).rowcount > 0
+
+    def submit_draft(self, user_id: int, assessment_id: int, allow_resubmission: bool) -> tuple[str, int | None]:
+        """Turn the user's draft for `assessment_id` into a submission, exactly once.
+
+        Returns ("submitted", submission_id), ("empty", None) when there is no draft for it
+        (already submitted, discarded, or never written), or ("closed", None) when the assessment
+        no longer accepts this user's answers; the draft is then discarded. Checking, inserting
+        the submission and deleting the draft happen in one transaction under the user's lock,
+        so repeated or concurrent submits create at most one submission.
+        """
+        with self._pool.connection() as conn:
+            self._lock_session(conn, user_id)
+            # Claiming the draft by deleting it is what makes this exactly-once even without the
+            # lock: a competing transaction blocks on these rows and then finds them gone.
+            claimed = conn.execute(
+                "DELETE FROM draft_answers WHERE user_id = %s AND assessment_id = %s RETURNING id, text",
+                (user_id, assessment_id),
+            ).fetchall()
+            if not claimed:
+                return "empty", None
+            parts = [r["text"] for r in sorted(claimed, key=lambda r: r["id"])]
+            conn.execute("UPDATE user_sessions SET target_assessment_id = NULL WHERE user_id = %s", (user_id,))
+            assessment = conn.execute("SELECT status FROM assessments WHERE id = %s FOR SHARE",
+                                      (assessment_id,)).fetchone()
+            already = not allow_resubmission and conn.execute(
+                "SELECT 1 FROM submissions WHERE assessment_id = %s AND user_id = %s LIMIT 1",
+                (assessment_id, user_id),
+            ).fetchone() is not None
+            if assessment is None or assessment["status"] != "published" or already:
+                return "closed", None
+            submission_id = conn.execute(
+                """INSERT INTO submissions (assessment_id, user_id, raw_text, created_at)
+                   VALUES (%s, %s, %s, %s) RETURNING id""",
+                (assessment_id, user_id, "\n".join(parts), _now()),
+            ).fetchone()["id"]
+            return "submitted", submission_id
+
+    def chat_history(self, user_id: int) -> list[tuple[str, str]]:
+        row = self._one("SELECT chat_history FROM user_sessions WHERE user_id = %s", (user_id,))
+        return [tuple(item) for item in json.loads(row["chat_history"])] if row else []
+
+    def append_chat_history(self, user_id: int, turns: list[tuple[str, str]], keep: int) -> None:
+        """Add messages to the user's chat history, keeping only the newest `keep`."""
+        with self._pool.connection() as conn:
+            self._lock_session(conn, user_id)
+            row = conn.execute("SELECT chat_history FROM user_sessions WHERE user_id = %s",
+                               (user_id,)).fetchone()
+            history = json.loads(row["chat_history"]) + [list(t) for t in turns]
+            history = history[max(len(history) - keep, 0):] if keep > 0 else []
+            conn.execute("UPDATE user_sessions SET chat_history = %s WHERE user_id = %s",
+                         (json.dumps(history), user_id))
