@@ -46,8 +46,8 @@ def assessment_blocks(assessment: dict[str, Any], questions: list[dict[str, Any]
         f"{len(questions)} questions · {num(total_points(questions))} points"
     )
     footer = (
-        "✍️ <b>To answer:</b> reply here with your answers in any format "
-        "(for example <code>1. B</code> then <code>2. your answer…</code>), then tap <b>Submit</b>."
+        "✍️ <b>How to answer:</b> Send your answers as text, files, or photos. You can use any format "
+        "(for example <code>1. B</code> then <code>2. your answer…</code>), then tap <b>✅ Submit</b> after sending your answers."
     )
     return [header, *question_blocks(questions, with_answers=False), footer]
 
@@ -58,7 +58,7 @@ async def add_to_draft(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
     svc = services(context)
     assessment = target_assessment(context, user.id)
     if assessment is None:
-        hint = "There is no assessment waiting for your answers right now."
+        hint = "📭 No assessments are waiting for your answers right now. Check /pending later."
         if svc.settings.is_admin(user.id):
             hint += " Send a PDF, DOCX or TXT file, or a photo, to create one."
         await message.reply_text(hint)
@@ -69,7 +69,7 @@ async def add_to_draft(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
         draft = {"assessment_id": assessment["id"], "parts": []}
         context.user_data["draft"] = draft
     if sum(len(p) for p in draft["parts"]) + len(text) > MAX_DRAFT_CHARS:
-        await message.reply_text("Your answers are too long. Submit what you have, or /cancel and start again.")
+        await message.reply_text("⚠️ Your saved answers have reached the size limit. Tap Submit to send them, or use /cancel to start over.")
         return
     draft["parts"].append(text)
 
@@ -77,8 +77,8 @@ async def add_to_draft(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
     await message.reply_text(
         f"Saved as your answer to <b>{esc(assessment['title'])}</b> "
         f"({parts} message{'s' if parts != 1 else ''} so far).\n"
-        "Send more if you are not finished, or tap Submit to have it graded. "
-        "Not an answer? Tap Undo.",
+        "You can keep sending answers, or tap ✅ Submit when you're finished. "
+        "Saved something by mistake? Tap ↩️ Undo.",
         parse_mode=ParseMode.HTML,
         reply_markup=draft_keyboard(assessment["id"]),
     )
@@ -196,7 +196,7 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if action == "clear":
         context.user_data.pop("draft", None)
         await query.answer("Discarded")
-        await query.edit_message_text("Your typed answers were discarded.")
+        await query.edit_message_text("🗑 Your unsent answers have been discarded.")
         return
 
     assessment_id = int(raw_id)
@@ -221,7 +221,7 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data.pop("target", None)
         submission_id = svc.db.create_submission(assessment_id, user.id, raw_text)
         await query.answer("Submitted")
-        await query.edit_message_text("📥 Answers received. Grading… this can take a moment.")
+        await query.edit_message_text("✅ Your answers have been submitted! Grading is in progress…")
         await context.bot.send_chat_action(user.id, ChatAction.TYPING)
         try:
             blocks = await grade_submission(context, submission_id)
@@ -229,8 +229,8 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             log.error("Grading failed for submission %s: %s", submission_id, exc)
             await context.bot.send_message(
                 user.id,
-                "Your answers are saved, but they could not be graded right now. "
-                "You do not need to send them again — you will get your result once grading is retried.",
+                "✅ Your answers are saved, but grading is temporarily unavailable. "
+                "You don't need to submit again. Your result will be sent after the administrator retries grading.",
             )
             for admin_id in svc.settings.admin_ids:
                 try:
@@ -251,14 +251,14 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     open_ = open_assessments(context, update.effective_user.id)
     if not open_:
-        await update.effective_message.reply_text("Nothing is waiting for your answers. 🎉")
+        await update.effective_message.reply_text("📭 You're all caught up! No assessments are waiting for your answers right now.")
         return
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"#{a['id']} · {a['title']}"[:60], callback_data=f"show:{a['id']}")]
         for a in open_[:20]
     ])
     await update.effective_message.reply_text(
-        "Open assessments. Tap one to see its questions and answer it:", reply_markup=keyboard
+        "📝 <b>Assessments to complete</b>\nChoose an assessment below to view its questions:", parse_mode=ParseMode.HTML, reply_markup=keyboard
     )
 
 
@@ -280,7 +280,7 @@ async def on_show_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def my_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     rows = services(context).db.user_submissions(update.effective_user.id)
     if not rows:
-        await update.effective_message.reply_text("You have not submitted anything yet.")
+        await update.effective_message.reply_text("📊 No results yet. After submitting an assessment, your scores will appear here.")
         return
     lines = ["<b>Your results</b>"]
     for row in rows:
@@ -295,7 +295,7 @@ async def my_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     had_draft = context.user_data.pop("draft", None)
     await update.effective_message.reply_text(
-        "Your typed answers were discarded." if had_draft else "There was nothing to discard."
+        "Your typed answers were discarded." if had_draft else "There are no unsent answers to discard."
     )
 
 
