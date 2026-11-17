@@ -21,7 +21,7 @@ USER_HELP = (
     "If I accidentally save a chat message as an answer, tap <b>Undo</b>.\n\n"
     "<b>Useful commands</b>\n"
     "/pending — View assessments you can answer\n"
-    "/myresults — View your grades and feedback scores\n"
+    "/myresults — View your scores and feedback\n"
     "/cancel — Discard your unsent answers\n"
     "/explain — Explain a question, photo or document\n"
     "/myid — Show your Telegram ID"
