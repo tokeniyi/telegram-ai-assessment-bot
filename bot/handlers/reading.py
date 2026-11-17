@@ -118,7 +118,7 @@ async def read_upload(
     message = messages[0]
     chat_id, user_id = message.chat_id, message.from_user.id
     if context.user_data.get("reading"):
-        await context.bot.send_message(chat_id, "⏳ I am still reading your previous file. Send this one again in a moment.")
+        await context.bot.send_message(chat_id, "⏳ I'm still reading your previous file. Please resend this one after it finishes.")
         return None
     context.user_data["reading"] = True
     note = ProgressNote(context.bot, chat_id)
@@ -152,4 +152,4 @@ def echo_block(document: DocumentResult) -> str:
     """The text read from a photo, shown back so that the sender can check it."""
     text = document.text
     shown = text[:ECHO_CHARS] + ("…" if len(text) > ECHO_CHARS else "")
-    return f"📷 <b>This is what I read:</b>\n<pre>{esc(shown)}</pre>"
+    return f"📷 <b>Text I found in your image:</b>\n<pre>{esc(shown)}</pre>"
