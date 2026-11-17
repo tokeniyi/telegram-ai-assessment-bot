@@ -35,7 +35,7 @@ MAX_CONTEXT_CHARS = 6_000
 
 # What an answer typically looks like: "1. B", "2) ...", "Q3 - ...", "a) ...".
 ANSWER_LIKE = re.compile(r"^\s*(?:q(?:uestion)?\s*)?\d+\s*[.):\-–]|^\s*[A-Da-d]\s*[.)]\s", re.IGNORECASE | re.MULTILINE)
-AI_DOWN = "❌ I could not reach my AI right now, so I cannot chat. Please try again in a moment."
+AI_DOWN = "❌ I could not reach my AI right now. Please try again in a moment, or use /pending to view assessments."
 
 
 def looks_like_answer(text: str) -> bool:
@@ -146,13 +146,13 @@ async def _offer_review(update: Update, context: ContextTypes.DEFAULT_TYPE, asse
     title = esc(assessment["title"])
     if not parts:
         await message.reply_text(
-            f"I have no answers saved for “{assessment['title']}” yet. Send them here "
+            f"I have no answers saved for “{assessment['title']}” yet. Send your answers here "
             "(typed, a file or a photo) and ask me to review them when you are done."
         )
         return
     await message.reply_text(
-        f"Sure. I have {len(parts)} message{'s' if len(parts) != 1 else ''} saved as your answers to "
-        f"<b>{title}</b>. Tap <b>Submit</b> to have them graded now.",
+        f"✅ Ready to review. I have {len(parts)} message{'s' if len(parts) != 1 else ''} saved as your answers to "
+        f"<b>{title}</b>. Tap <b>✅ Submit</b> to send them for grading.",
         parse_mode=ParseMode.HTML,
         reply_markup=student.draft_keyboard(assessment["id"]),
     )

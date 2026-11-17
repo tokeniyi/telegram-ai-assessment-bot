@@ -78,12 +78,12 @@ async def test_cancel_and_discard_after_a_restart(make_harness):
     await h2.text(STUDENT_ID, "/cancel")
     assert h2.tg.texts(STUDENT_ID)[-1] == "Your typed answers were discarded."
     await h2.text(STUDENT_ID, "/cancel")
-    assert h2.tg.texts(STUDENT_ID)[-1] == "There was nothing to discard."
+    assert h2.tg.texts(STUDENT_ID)[-1] == "There are no unsent answers to discard."
 
     await h2.text(STUDENT_ID, "1. A")
     h3 = await restart(make_harness)
     await h3.press(STUDENT_ID, "ans:clear:0")
-    assert edits(h3)[-1] == "Your typed answers were discarded."
+    assert edits(h3)[-1] == "🗑 Your unsent answers have been discarded."
     await h3.press(STUDENT_ID, "ans:submit:1")
     assert h3.db.get_submission(1) is None
 
