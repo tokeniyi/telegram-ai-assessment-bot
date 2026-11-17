@@ -214,5 +214,7 @@ Tesseract and EasyOCR run only where those engines are installed.
 - EasyOCR, when enabled, reads English only. HEIC photos need `pip install pillow-heif` (not tested).
 - A picture inside a page that also has a full text layer is not OCRed; that page's text layer is used.
 - Material longer than `MAX_DOCUMENT_CHARS` is cut at that length, and the admin is told.
-- Answers typed but not yet submitted are kept in memory and are lost if the bot restarts.
+- Answers typed but not yet submitted, the assessment picked with `/pending` and recent chat are
+  stored in PostgreSQL, so a restart or redeploy does not lose them. A grading that is running when
+  the bot stops is not resumed automatically; the submission is kept and `/regrade` retries it.
 - The bot works in private chats only; it does not post to groups or channels.

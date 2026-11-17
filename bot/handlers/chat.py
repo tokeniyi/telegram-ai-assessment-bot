@@ -55,7 +55,7 @@ def build_context(context: ContextTypes.DEFAULT_TYPE, user_id: int, assessment: 
             if q["options"]:
                 line += " Options: " + "; ".join(f"{'ABCDEFGH'[i]}) {o}" for i, o in enumerate(q["options"]))
             lines.append(line)
-        saved = len(student.draft_parts(context, assessment["id"]))
+        saved = len(student.draft_parts(context, user_id, assessment["id"]))
         lines.append(f"Answer messages the student has saved so far: {saved}.")
     else:
         lines.append("No assessment is open for this student right now.")
@@ -81,15 +81,17 @@ def build_context(context: ContextTypes.DEFAULT_TYPE, user_id: int, assessment: 
     return "\n".join(lines)[:MAX_CONTEXT_CHARS]
 
 
-def _history(context: ContextTypes.DEFAULT_TYPE) -> list[tuple[str, str]]:
-    return context.user_data.setdefault("chat_history", [])
+def _history(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> list[tuple[str, str]]:
+    return services(context).db.chat_history(user_id)
 
 
-def _remember(context: ContextTypes.DEFAULT_TYPE, role: str, text: str) -> None:
-    turns = services(context).settings.chat_history_turns
-    history = _history(context)
-    history.append((role, text[:MAX_HISTORY_ITEM]))
-    del history[: max(len(history) - 2 * turns, 0)]
+def _remember(context: ContextTypes.DEFAULT_TYPE, user_id: int, student_text: str, reply: str) -> None:
+    """Store one exchange (the student's message and what the bot did) in the chat history."""
+    svc = services(context)
+    svc.db.append_chat_history(
+        user_id, [("Student", student_text[:MAX_HISTORY_ITEM]), ("Assistant", reply[:MAX_HISTORY_ITEM])],
+        keep=2 * svc.settings.chat_history_turns,
+    )
 
 
 # ── routing ──────────────────────────────────────────────────────────────
@@ -99,7 +101,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await student.add_to_draft(update, context, text)  # chat is switched off: all text is an answer
         return
     # One message at a time per user: answers often arrive as a quick series of messages, and
-    # each must be classified and saved in order.
+    # each must be classified and saved in order. This lock orders them within this process;
+    # the draft itself is changed in database transactions, which are safe across processes.
     async with context.user_data.setdefault("chat_lock", asyncio.Lock()):
         await _route(update, context, text)
 
@@ -112,13 +115,13 @@ async def _route(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) 
     await context.bot.send_chat_action(message.chat_id, ChatAction.TYPING)
     try:
         decision = await svc.ai.converse(
-            text[:MAX_MESSAGE_FOR_AI], _history(context), build_context(context, user.id, assessment),
+            text[:MAX_MESSAGE_FOR_AI], _history(context, user.id), build_context(context, user.id, assessment),
             can_answer=assessment is not None,
         )
     except AIError as exc:
         log.error("Chat classification failed: %s", exc)
         # Never lose an answer because the AI is down: keep what clearly is one.
-        if assessment is not None and (student.draft_parts(context, assessment["id"]) or looks_like_answer(text)):
+        if assessment is not None and (student.draft_parts(context, user.id, assessment["id"]) or looks_like_answer(text)):
             await student.add_to_draft(update, context, text)
         else:
             await message.reply_text(AI_DOWN)
@@ -126,21 +129,20 @@ async def _route(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) 
 
     intent = decision["intent"]
     log.info("Chat intent for user %s: %s", user.id, intent)
-    _remember(context, "Student", text)
     if intent == "answer":
-        _remember(context, "Assistant", "(saved as an answer)")
+        _remember(context, user.id, text, "(saved as an answer)")
         await student.add_to_draft(update, context, text)
     elif intent == "review":
-        _remember(context, "Assistant", "(offered to submit the saved answers)")
+        _remember(context, user.id, text, "(offered to submit the saved answers)")
         await _offer_review(update, context, assessment)
     else:
-        _remember(context, "Assistant", decision["reply"])
+        _remember(context, user.id, text, decision["reply"])
         await send_blocks(context.bot, message.chat_id, [esc(decision["reply"])])
 
 
 async def _offer_review(update: Update, context: ContextTypes.DEFAULT_TYPE, assessment: dict[str, Any]) -> None:
     message = update.effective_message
-    parts = student.draft_parts(context, assessment["id"])
+    parts = student.draft_parts(context, update.effective_user.id, assessment["id"])
     title = esc(assessment["title"])
     if not parts:
         await message.reply_text(
