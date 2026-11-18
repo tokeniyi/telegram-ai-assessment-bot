@@ -1,9 +1,10 @@
 from telegram.ext import Application
 
-from . import admin, chat, common, explain, student, uploads
+from . import admin, chat, common, dedupe, explain, student, uploads
 
 
 def register_handlers(application: Application) -> None:
+    dedupe.register(application)  # first: a copy of an update stops before any other handler
     common.register(application)
     admin.register(application)
     explain.register(application)

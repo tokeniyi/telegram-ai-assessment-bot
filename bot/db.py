@@ -70,6 +70,16 @@ CREATE TABLE IF NOT EXISTS draft_answers (
     text           TEXT NOT NULL,
     created_at     TEXT NOT NULL
 );
+-- Every Telegram update the bot has started to handle. Telegram delivers an update again when
+-- the bot did not confirm it (a crash or redeploy right after fetching, or two bot processes
+-- polling at once during a deploy); the primary key lets exactly one process claim it.
+CREATE TABLE IF NOT EXISTS processed_updates (
+    bot_id       BIGINT NOT NULL,
+    update_id    BIGINT NOT NULL,
+    received_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (bot_id, update_id)
+);
+CREATE INDEX IF NOT EXISTS idx_processed_updates_received ON processed_updates(received_at);
 CREATE INDEX IF NOT EXISTS idx_questions_assessment ON questions(assessment_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_lookup ON submissions(assessment_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_draft_answers_user ON draft_answers(user_id, id);
@@ -109,7 +119,26 @@ class Database:
         with self._pool.connection() as conn:
             conn.execute(query, params)
 
-# ── users ────────────────────────────────────────────────────────────
+    # ── processed Telegram updates ───────────────────────────────────────
+    def claim_update(self, bot_id: int, update_id: int) -> bool:
+        """Record that this update is being handled. Returns False if it was already claimed,
+        by this process or another one, so the caller must not handle it again."""
+        row = self._one(
+            """INSERT INTO processed_updates (bot_id, update_id) VALUES (%s, %s)
+               ON CONFLICT DO NOTHING RETURNING update_id""",
+            (bot_id, update_id),
+        )
+        return row is not None
+
+    def prune_processed_updates(self, older_than_hours: float) -> int:
+        """Forget updates claimed more than `older_than_hours` ago. Returns how many."""
+        with self._pool.connection() as conn:
+            return conn.execute(
+                "DELETE FROM processed_updates WHERE received_at < now() - make_interval(secs => %s)",
+                (older_than_hours * 3600,),
+            ).rowcount
+
+    # ── users ────────────────────────────────────────────────────────────
     def upsert_user(self, user_id: int, username: str | None, full_name: str | None) -> None:
         self._run(
             """INSERT INTO users (user_id, username, full_name, is_active, joined_at)

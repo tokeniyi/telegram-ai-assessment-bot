@@ -140,6 +140,33 @@ assessment still discards the draft, as before: a user has one draft at a time.
 The new tables are created on start (`CREATE TABLE IF NOT EXISTS`); existing data is not touched.
 New file: `tests/test_sessions.py` (restart, resume, undo, cancel, switching, exactly-once submit).
 
+### Stage 2: each Telegram update is handled once
+
+Telegram sends an update again when the bot did not confirm it: the process crashed or was
+redeployed right after fetching a batch, or two bot versions polled at the same time during a
+Railway deploy. Before, such a copy was handled again: an answer saved twice, the same upload sent
+to the AI twice, the same photo read and explained twice.
+
+Now the first handler of all (`bot/handlers/dedupe.py`, group -2) records the update's id in the new
+`processed_updates` table (`PRIMARY KEY (bot_id, update_id)`, `INSERT … ON CONFLICT DO NOTHING`).
+Only the process whose insert succeeds handles the update; every copy stops before any other handler,
+in this process or another one.
+
+- **At most once, not exactly once.** The id is recorded *before* handling. If a crash cuts handling
+  short and Telegram resends the update, the copy is skipped and the user sends that message again.
+  This was chosen over repeating half-done work (a second draft line, a second broadcast).
+- **Fails open.** If the database cannot record the id, the update is handled anyway and a warning is
+  logged; the bot does not go silent while PostgreSQL has a hiccup.
+- **Double taps are a different thing.** Two taps on Submit are two updates with different ids, so
+  this guard does not merge them; `Database.submit_draft` (Stage 1) still makes them one submission.
+- **Clean-up.** Telegram keeps an unconfirmed update for at most 24 hours, so records older than 48
+  hours are deleted at start-up and after every 1000 updates.
+- `bot_id` is part of the key because a new bot token starts its own numbering.
+
+The table is created on start (`CREATE TABLE IF NOT EXISTS`); existing data is not touched.
+New files: `bot/handlers/dedupe.py`, `tests/test_updates.py`. The test harness now shares one update
+counter between harnesses that stand for a restarted bot, as Telegram does.
+
 ## 3. Things to know
 
 ### Unverified: the Kilo model IDs

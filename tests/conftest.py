@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import itertools
 import time
 import uuid
 from pathlib import Path
@@ -156,18 +157,27 @@ def make_settings(database_url: str, **overrides) -> Settings:
 
 
 class Harness:
-    def __init__(self, application, telegram, provider):
+    def __init__(self, application, telegram, provider, update_ids=None):
         self.app, self.tg, self.ai = application, telegram, provider
         self.db = application.bot_data["services"].db
+        # Telegram numbers a bot's updates in one sequence, whichever process receives them, so
+        # harnesses standing for a restarted bot share the counter.
+        self._update_ids = update_ids or itertools.count(1)
         self._update_id = 0
+        self.last_update = None
 
     def _user(self, user_id):
         return {"id": user_id, "is_bot": False, "first_name": f"User{user_id}", "username": f"u{user_id}"}
 
     async def _process(self, payload):
-        self._update_id += 1
+        self._update_id = next(self._update_ids)
         payload["update_id"] = self._update_id
-        await self.app.process_update(Update.de_json(payload, self.app.bot))
+        self.last_update = payload
+        await self.deliver(payload)
+
+    async def deliver(self, payload):
+        """Hand the bot an update exactly as given, e.g. a copy Telegram sends again."""
+        await self.app.process_update(Update.de_json(json.loads(json.dumps(payload)), self.app.bot))
 
     def _message(self, user_id, **fields):
         return {"message_id": self._update_id + 1, "date": int(time.time()),
@@ -243,6 +253,7 @@ def pg_url():
 @pytest.fixture
 async def make_harness(pg_url):
     created = []
+    update_ids = itertools.count(1)
 
     async def factory(**overrides):
         telegram = FakeTelegram()
@@ -252,7 +263,7 @@ async def make_harness(pg_url):
         application.bot_data["services"].ai.provider = provider
         await application.initialize()
         created.append(application)
-        return Harness(application, telegram, provider)
+        return Harness(application, telegram, provider, update_ids)
 
     yield factory
     for application in created:
