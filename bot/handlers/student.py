@@ -294,7 +294,7 @@ async def my_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     had_draft = services(context).db.discard_draft(update.effective_user.id)
     await update.effective_message.reply_text(
-        "Your typed answers were discarded." if had_draft else "There are no unsent answers to discard."
+        "🗑 Your unsent answers have been discarded." if had_draft else "There are no unsent answers to discard."
     )
 
 

@@ -76,7 +76,7 @@ async def test_cancel_and_discard_after_a_restart(make_harness):
 
     h2 = await restart(make_harness)
     await h2.text(STUDENT_ID, "/cancel")
-    assert h2.tg.texts(STUDENT_ID)[-1] == "Your typed answers were discarded."
+    assert h2.tg.texts(STUDENT_ID)[-1] == "🗑 Your unsent answers have been discarded."
     await h2.text(STUDENT_ID, "/cancel")
     assert h2.tg.texts(STUDENT_ID)[-1] == "There are no unsent answers to discard."
 
