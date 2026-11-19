@@ -119,7 +119,8 @@ tests/                  offline tests with a fake Telegram API and a fake AI
 ```
 
 Data is stored in PostgreSQL (set `DATABASE_URL`; the tables are created on first run). Submissions are saved before
-grading, so an answer is never lost if the AI call fails.
+grading, so an answer is never lost if the AI call fails. Each Telegram update is recorded before it
+is handled, so one that Telegram sends again (after a crash, or during a deploy) is not handled twice.
 
 ## OCR: scanned PDFs and photos
 

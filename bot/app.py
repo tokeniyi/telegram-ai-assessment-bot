@@ -12,6 +12,7 @@ from .ai import AssessmentAI, build_provider
 from .config import Settings
 from .db import Database
 from .handlers import register_handlers
+from .handlers.dedupe import prune as prune_update_records
 from .ocr import OCRService
 from .utils import Services
 
@@ -50,6 +51,7 @@ async def _post_init(application: Application) -> None:
     log.info("Bot @%s is running. AI: %s / %s. Admins: %s",
              me.username, services.settings.ai_provider, services.settings.ai_model,
              sorted(services.settings.admin_ids) or "none")
+    prune_update_records(services.db)
     log.info(services.ocr.describe())
     services.ocr.warm_up()
     if not services.settings.admin_ids:
