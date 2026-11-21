@@ -10,6 +10,8 @@ A Telegram bot that turns study material into graded assessments:
 
 Full notes on what changed and what to know before running it: [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md).
 
+Planned work, stage by stage: [ROADMAP.md](ROADMAP.md).
+
 ## Setup
 
 Requires Python 3.10 or newer and a PostgreSQL database (12 or newer). Create an empty one first,
