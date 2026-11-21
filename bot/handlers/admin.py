@@ -189,6 +189,10 @@ async def on_draft_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer("Publishing…")
         await query.edit_message_reply_markup(None)
         log.info("Assessment %s published; sending to %s users", assessment_id, queued)
+        if not queued:  # nobody to send it to: there is no queue to report on
+            svc.db.mark_report_sent(assessment_id)
+            await context.bot.send_message(chat_id, work.delivery_report(assessment_id, {}))
+            return
         # Sent from the queue: if the bot stops halfway, the next start sends the rest.
         await work.deliver(context.bot, svc, assessment_id)
         await work.report_deliveries(context.bot, svc, assessment_id)
@@ -319,28 +323,27 @@ async def regrade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text("✅ All submissions for this assessment have already been graded.")
         return
     lease = work.grading_lease(svc)
-    # A submission that is being graded right now (just submitted, or picked up after a
-    # restart) is left to whoever is grading it.
-    claimed = [s for s in waiting if svc.db.claim_for_regrade(s["id"], lease)]
-    busy = len(waiting) - len(claimed)
-    busy_note = f" {busy} other(s) are being graded right now." if busy else ""
-    if not claimed:
-        await message.reply_text(f"⏳ All {busy} ungraded submission(s) are being graded right now.")
-        return
-    await message.reply_text(f"⏳ Grading {len(claimed)} submission(s)…{busy_note}")
-    done = 0
-    for index, submission in enumerate(claimed):
+    await message.reply_text(f"⏳ Grading {len(waiting)} submission(s)…")
+    done = busy = delivered = 0
+    for submission in waiting:
+        # Claimed one at a time, just before grading, so that a long batch does not outlive its
+        # leases. One that is being graded right now (just submitted, or picked up after a
+        # restart) is left to whoever is grading it.
+        if not svc.db.claim_for_regrade(submission["id"], lease):
+            busy += 1
+            continue
         try:
             blocks = await work.grade(svc, submission["id"])
         except AIError as exc:
-            for rest in claimed[index + 1:]:  # release them for the next /regrade
-                svc.db.mark_submission_failed(rest["id"])
             await message.reply_text(f"❌ Stopped after {done}: {exc}")
             return
         done += 1
-        if blocks is not None:
-            await work.send_result(context.bot, svc, submission, blocks)
-    await message.reply_text(f"✅ Graded {done} submission(s). The users have their results.")
+        if blocks is not None and await work.send_result(context.bot, svc, submission, blocks):
+            delivered += 1
+    report = f"✅ Graded {done} submission(s); {delivered} user(s) received their result."
+    if busy:
+        report += f"\n⏳ {busy} were being graded already and will be sent when ready."
+    await message.reply_text(report)
 
 
 async def users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -13,9 +13,11 @@ Both are driven from rows in PostgreSQL rather than from the handler that starte
 without an admin doing anything. The handlers call the same functions for the work they start.
 
 Leases make each piece of work owned by one process at a time, including while two bot versions
-run during a deploy. A process that stops between sending a message and marking it sent leaves a
-row that is sent again once its lease runs out; that narrow window is the only way a user can
-receive an assessment twice.
+run during a deploy. An assessment message is retried only when Telegram certainly did not get it
+(not after a timeout, and not once part of it was sent), so the one way a user can receive an
+assessment twice is a process stopping between sending it and marking it sent, after which the row
+is sent again once its lease runs out. Results are the other way round: a result that may not have
+arrived is sent once more, because a lost result is worse than a repeated one.
 """
 
 from __future__ import annotations
@@ -25,11 +27,12 @@ import logging
 from typing import Any
 
 from telegram import Bot
-from telegram.error import Forbidden, RetryAfter, TelegramError
+from telegram.constants import ParseMode
+from telegram.error import Forbidden, RetryAfter, TelegramError, TimedOut
 from telegram.ext import Application
 
 from ..ai import AIError
-from ..utils import Services, send_blocks, total_points
+from ..utils import Services, pack_blocks, send_blocks, total_points
 from . import student
 
 log = logging.getLogger(__name__)
@@ -53,13 +56,28 @@ def grading_lease(services: Services) -> float:
 
 
 # ── sending a published assessment ───────────────────────────────────────
+class PartlySent(Exception):
+    """Some of the messages of one assessment reached the user; sending again would repeat them."""
+
+
 async def _send_once(bot: Bot, user_id: int, blocks: list[str]) -> None:
-    try:
-        await send_blocks(bot, user_id, blocks)
-    except RetryAfter as exc:
-        delay = exc.retry_after
-        await asyncio.sleep(delay.total_seconds() if hasattr(delay, "total_seconds") else delay)
-        await send_blocks(bot, user_id, blocks)
+    """Send the assessment's messages, waiting once if Telegram asks to slow down."""
+    texts = pack_blocks(blocks)
+    for index, text in enumerate(texts):
+        for attempt in (1, 2):
+            try:
+                await bot.send_message(user_id, text, parse_mode=ParseMode.HTML,
+                                       disable_web_page_preview=True)
+                break
+            except RetryAfter as exc:
+                if attempt == 2:
+                    raise PartlySent(f"part {index + 1} of {len(texts)}: {exc}") if index else exc
+                delay = exc.retry_after
+                await asyncio.sleep(delay.total_seconds() if hasattr(delay, "total_seconds") else delay)
+            except TelegramError as exc:
+                if index and not isinstance(exc, Forbidden):
+                    raise PartlySent(f"part {index + 1} of {len(texts)}: {exc}") from exc
+                raise
 
 
 async def deliver(bot: Bot, svc: Services, assessment_id: int | None = None) -> int:
@@ -81,10 +99,14 @@ async def deliver(bot: Bot, svc: Services, assessment_id: int | None = None) -> 
         except Forbidden:
             db.set_user_active(user_id, False)
             db.finish_delivery(aid, user_id, "blocked")
+        except (TimedOut, PartlySent) as exc:
+            # Telegram may have delivered it (or part of it): sending again could repeat it.
+            db.finish_delivery(aid, user_id, "failed", str(exc))
+            log.warning("Sending assessment %s to %s may not have completed; not retrying: %s", aid, user_id, exc)
         except TelegramError as exc:
             status = db.retry_delivery_later(aid, user_id, DELIVERY_RETRY_DELAY, MAX_DELIVERY_ATTEMPTS, str(exc))
             log.warning("Could not send assessment %s to %s (%s): %s", aid, user_id,
-                        "giving up" if status == "failed" else "will retry", exc)
+                        {"failed": "giving up", "pending": "will retry"}.get(status, "assessment closed"), exc)
         else:
             db.finish_delivery(aid, user_id, "sent")
         await asyncio.sleep(SEND_DELAY)

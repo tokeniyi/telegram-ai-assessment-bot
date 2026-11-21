@@ -331,7 +331,7 @@ async def test_a_result_lost_by_a_restart_is_sent_later_once(make_harness):
 async def test_regrade_leaves_a_submission_that_is_being_graded_alone(make_harness):
     old = await submit_and_crash_while_grading(make_harness)
     await old.text(ADMIN_ID, "/regrade 1")
-    assert "being graded right now" in old.tg.texts(ADMIN_ID)[-1]
+    assert "were being graded already" in old.tg.texts(ADMIN_ID)[-1]
     assert old.db.get_submission(1)["status"] == "pending"
 
     expire_grading_leases(old.db)  # abandoned: the admin may take it
@@ -374,6 +374,151 @@ async def test_background_work_survives_an_error_and_stops_cleanly(harness, monk
     assert "Background sending failed" in caplog.text
     await work.stop(h.app)
     assert task.cancelled() and "work_task" not in h.app.bot_data
+
+
+# ── found in review: edge cases ──────────────────────────────────────────
+async def test_an_assessment_closed_by_the_old_version_is_still_reported(harness):
+    """During a deploy the old version's /close only changes the status; the pending rows it
+    leaves must not block the publisher's report forever."""
+    h = harness
+    await draft_with_students(h)
+    h.db.publish_assessment(1, ADMIN_ID)
+    h.db.set_status(1, "closed")  # what the previous version's /close does
+    await work.run_once(h.app.bot, h.app.bot_data["services"])
+    assert sum(received(h, u) for u in STUDENTS) == 0
+    assert h.db.delivery_counts(1) == {"cancelled": 6}
+    assert "6 were not sent because the assessment was closed" in h.tg.texts(ADMIN_ID)[-1]
+
+
+async def test_a_message_being_sent_when_the_assessment_closes_counts_as_sent(harness):
+    h = harness
+    await draft_with_students(h, STUDENTS[:1])
+
+    def close_meanwhile(method, params):
+        if method == "sendMessage" and int(params["chat_id"]) == STUDENTS[0] and QUESTION in params["text"]:
+            h.db.close_assessment(1)  # /close lands while this message is on its way
+        return None
+
+    h.tg.fail = close_meanwhile
+    await h.press(ADMIN_ID, "pub:1")
+    assert h.db._one("SELECT status FROM deliveries WHERE user_id = %s", (STUDENTS[0],))["status"] == "sent"
+
+
+async def test_regrade_claims_each_submission_only_when_it_grades_it(make_harness):
+    """A long /regrade batch must not hold leases on submissions it has not reached yet, or they
+    run out and the background work grades (or gives up on) them at the same time."""
+    h = await make_harness(allow_resubmission=True)
+    await publish(h)
+    h.ai.error = AIError("provider down")
+    for answer in ("1. B", "1. A"):
+        await h.text(STUDENT_ID, answer)
+        await h.press(STUDENT_ID, "ans:submit:1")
+    assert [h.db.get_submission(i)["status"] for i in (1, 2)] == ["failed", "failed"]
+    h.ai.error = None
+    seen = []
+    complete = h.ai.complete
+
+    async def watch(system, user):
+        if not system.startswith("You are the chat assistant"):
+            seen.append(h.db.get_submission(2)["status"])
+        return await complete(system, user)
+
+    h.ai.complete = watch
+    await h.text(ADMIN_ID, "/regrade 1")
+    assert seen[0] == "failed"  # while grading the first, the second is not claimed yet
+    assert [h.db.get_submission(i)["status"] for i in (1, 2)] == ["graded", "graded"]
+    assert "2 user(s) received their result" in h.tg.texts(ADMIN_ID)[-1]
+
+
+async def test_a_result_sent_by_the_old_version_is_not_sent_again(harness):
+    """The previous version's /regrade saves a grade and sends it without knowing about
+    result_due or result_sent_at; the new version must not send it a second time."""
+    h = harness
+    await publish(h)
+    h.ai.error = AIError("provider down")
+    await h.text(STUDENT_ID, "1. B")
+    await h.press(STUDENT_ID, "ans:submit:1")
+    h.db._run("""UPDATE submissions SET status = 'graded', score = 1, max_score = 4, feedback = '',
+                 details = '[]', graded_at = '2000-01-01T00:00:00+00:00' WHERE id = 1""")  # old save_grade
+    await work.run_once(h.app.bot, h.app.bot_data["services"])
+    assert not [t for t in h.tg.texts(STUDENT_ID) if "Result" in t]
+
+
+async def test_a_timed_out_send_is_not_repeated(harness):
+    """Telegram may have delivered a message whose request timed out: no second copy."""
+    from telegram.error import TimedOut
+    h = harness
+    await draft_with_students(h, STUDENTS[:1])
+
+    def time_out(method, params):
+        if method == "sendMessage" and int(params["chat_id"]) == STUDENTS[0] and QUESTION in params["text"]:
+            raise TimedOut()
+        return None
+
+    h.tg.fail = time_out
+    await h.press(ADMIN_ID, "pub:1")
+    h.tg.fail = None
+    expire_delivery_leases(h.db)
+    await work.run_once(h.app.bot, h.app.bot_data["services"])
+    assert received(h, STUDENTS[0]) == 0
+    assert h.db.delivery_counts(1) == {"sent": 1, "failed": 1}
+    assert "1 could not be reached" in h.tg.texts(ADMIN_ID)[-1]
+
+
+async def test_a_partly_sent_long_assessment_is_not_repeated(harness):
+    h = harness
+    for user_id in (ADMIN_ID, STUDENTS[0]):
+        await h.text(user_id, "/start")
+    long_questions = [{"type": "short", "question": f"{QUESTION} {i}? " + "x" * 900, "answer": "a", "points": 1}
+                      for i in range(8)]
+    aid = h.db.create_assessment("Long", None, "src", None, ADMIN_ID, long_questions)
+    sends = {"n": 0}
+
+    def fail_second_part(method, params):
+        if method == "sendMessage" and int(params["chat_id"]) == STUDENTS[0]:
+            sends["n"] += 1
+            if sends["n"] == 2:
+                return 500, "Internal Server Error"
+        return None
+
+    h.tg.fail = fail_second_part
+    before = len(h.tg.texts(STUDENTS[0]))
+    await h.press(ADMIN_ID, f"pub:{aid}")
+    first_part = len(h.tg.texts(STUDENTS[0]))
+    assert first_part == before + 1  # only the first of several messages arrived
+    h.tg.fail = None
+    expire_delivery_leases(h.db)
+    await work.run_once(h.app.bot, h.app.bot_data["services"])
+    assert len(h.tg.texts(STUDENTS[0])) == first_part  # the first part is not sent again
+    assert h.db._one("SELECT status FROM deliveries WHERE user_id = %s", (STUDENTS[0],))["status"] == "failed"
+
+
+async def test_publishing_to_nobody_still_reports(harness, monkeypatch):
+    """Rare in practice (the admin pressing Send is an active user), but the admin must still get
+    a report when the queue is empty."""
+    h = harness
+    await h.document(ADMIN_ID, "notes.txt", MATERIAL)
+    publish_for_real = h.db.publish_assessment
+
+    def publish_to_nobody(assessment_id, published_by):
+        publish_for_real(assessment_id, published_by)
+        h.db._run("DELETE FROM deliveries")
+        return 0
+
+    monkeypatch.setattr(h.db, "publish_assessment", publish_to_nobody)
+    await h.press(ADMIN_ID, "pub:1")
+    assert "sent to 0 users" in h.tg.texts(ADMIN_ID)[-1]
+    await work.run_once(h.app.bot, h.app.bot_data["services"])
+    assert sum("sent to" in t for t in h.tg.texts(ADMIN_ID)) == 1
+
+
+async def test_shutdown_stops_the_background_work_even_without_stop(harness):
+    """If start-up fails after post_init, PTB skips post_stop; post_shutdown must still stop it."""
+    h = harness
+    work.start(h.app)
+    task = h.app.bot_data["work_task"]
+    await h.app.post_shutdown(h.app)
+    assert task.cancelled()
 
 
 # ── the database side ────────────────────────────────────────────────────

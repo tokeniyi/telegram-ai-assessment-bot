@@ -100,6 +100,9 @@ ALTER TABLE assessments ADD COLUMN IF NOT EXISTS delivery_reported_at TIMESTAMPT
 ALTER TABLE submissions ADD COLUMN IF NOT EXISTS grading_attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE submissions ADD COLUMN IF NOT EXISTS grading_claimed_until TIMESTAMPTZ;
 ALTER TABLE submissions ADD COLUMN IF NOT EXISTS result_sent_at TIMESTAMPTZ;
+-- Set by this version when it saves a grade, cleared once the result is sent. An older version
+-- running during a deploy never sets it, so a result it sent itself is never sent again.
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS result_due BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS idx_submissions_pending ON submissions(id) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_questions_assessment ON questions(assessment_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_lookup ON submissions(assessment_id, user_id);
@@ -320,11 +323,12 @@ class Database:
         )
 
     def finish_delivery(self, assessment_id: int, user_id: int, status: str, error: str | None = None) -> None:
-        """Record the outcome of a claimed delivery: 'sent', 'blocked' or 'failed'."""
+        """Record the outcome of a claimed delivery: 'sent', 'blocked' or 'failed'. A row cancelled
+        by /close while its message was being sent still records what happened to it."""
         self._run(
             """UPDATE deliveries SET status = %s, last_error = %s, claimed_until = NULL,
                       sent_at = CASE WHEN %s = 'sent' THEN now() END
-               WHERE assessment_id = %s AND user_id = %s AND status = 'pending'""",
+               WHERE assessment_id = %s AND user_id = %s AND status IN ('pending', 'cancelled')""",
             (status, error, status, assessment_id, user_id),
         )
 
@@ -340,7 +344,7 @@ class Database:
                WHERE assessment_id = %s AND user_id = %s AND status = 'pending' RETURNING status""",
             (error, max_attempts, delay_seconds, assessment_id, user_id),
         )
-        return row["status"] if row else "pending"
+        return row["status"] if row else "cancelled"
 
     def delivery_counts(self, assessment_id: int) -> dict[str, int]:
         rows = self._all(
@@ -356,6 +360,12 @@ class Database:
         """
         only = "AND a.id = %s" if assessment_id is not None else ""
         with self._pool.connection() as conn:
+            # An assessment closed by an older version (during a deploy) still has pending rows;
+            # they will never be sent, so they count as cancelled.
+            conn.execute(
+                """UPDATE deliveries d SET status = 'cancelled' FROM assessments a
+                   WHERE a.id = d.assessment_id AND a.status != 'published' AND d.status = 'pending'"""
+            )
             rows = conn.execute(
                 f"""UPDATE assessments a SET delivery_reported_at = now()
                     WHERE a.delivery_reported_at IS NULL {only}
@@ -404,10 +414,14 @@ class Database:
         (by another process that picked it up too), so only one result is ever sent."""
         return self._one(
             """UPDATE submissions SET status = 'graded', score = %s, max_score = %s, feedback = %s,
-                      details = %s, graded_at = %s, grading_claimed_until = NULL
+                      details = %s, graded_at = %s, grading_claimed_until = NULL, result_due = TRUE
                WHERE id = %s AND status != 'graded' RETURNING id""",
             (score, max_score, feedback, json.dumps(details), _now(), submission_id),
         ) is not None
+
+    def mark_report_sent(self, assessment_id: int) -> None:
+        """For an assessment published to nobody: its (empty) report has been sent."""
+        self._run("UPDATE assessments SET delivery_reported_at = now() WHERE id = %s", (assessment_id,))
 
     def mark_submission_failed(self, submission_id: int) -> None:
         self._run(
@@ -463,21 +477,21 @@ class Database:
 
     def mark_result_sent(self, submission_id: int) -> None:
         """Record that the user has the result of this graded submission."""
-        self._run("UPDATE submissions SET result_sent_at = now() WHERE id = %s AND result_sent_at IS NULL",
-                  (submission_id,))
+        self._run("UPDATE submissions SET result_sent_at = now(), result_due = FALSE "
+                  "WHERE id = %s AND result_due", (submission_id,))
 
     def claim_unsent_result(self, grace_seconds: float) -> dict[str, Any] | None:
         """A graded submission whose result was never sent (the process stopped or Telegram
         failed between saving the grade and sending it), graded more than `grace_seconds` ago.
         It is marked as sent before it is returned, so this retry happens at most once.
 
-        Only submissions graded by this version (grading_attempts > 0) are considered, so results
-        that an older version already sent are not sent again.
+        Only grades saved by this version (result_due) are considered, so results that an older
+        version sent itself are not sent again.
         """
         return self._one(
-            """UPDATE submissions SET result_sent_at = now() WHERE id = (
+            """UPDATE submissions SET result_sent_at = now(), result_due = FALSE WHERE id = (
                    SELECT id FROM submissions
-                   WHERE status = 'graded' AND result_sent_at IS NULL AND grading_attempts > 0
+                   WHERE status = 'graded' AND result_due
                      AND graded_at::timestamptz < now() - make_interval(secs => %s)
                    ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)
                RETURNING *""",

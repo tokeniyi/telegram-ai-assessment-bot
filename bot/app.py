@@ -67,6 +67,7 @@ async def _post_stop(application: Application) -> None:
 
 
 async def _post_shutdown(application: Application) -> None:
+    await work.stop(application)  # also when start-up failed after post_init, so post_stop never ran
     application.bot_data["services"].ocr.shutdown()
     application.bot_data["services"].db.close()
 
