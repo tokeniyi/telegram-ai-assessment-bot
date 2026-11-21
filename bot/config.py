@@ -187,6 +187,9 @@ def load_settings(env_file: Path | None = None) -> Settings:
     webhook_url = _get("WEBHOOK_URL").rstrip("/") or None
     if webhook_url and not webhook_url.startswith("https://"):
         problems.append("WEBHOOK_URL must start with https:// (Telegram only calls HTTPS webhooks)")
+    elif webhook_url and "/" in webhook_url[len("https://"):]:
+        problems.append("WEBHOOK_URL must be the address only, without a path "
+                        "(e.g. https://my-bot.up.railway.app); the bot adds /telegram")
     if webhook_url and port is None:
         problems.append("WEBHOOK_URL needs PORT, the port the bot listens on (Railway sets it)")
     webhook_secret = _get("WEBHOOK_SECRET") or (

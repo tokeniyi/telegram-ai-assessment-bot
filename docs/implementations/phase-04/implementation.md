@@ -5,7 +5,7 @@
 | Roadmap stage | Stage 4 in [ROADMAP.md](../../../ROADMAP.md) |
 | Branch | `claude/lucid-brahmagupta-dri4yd` |
 | Pull request | see [summary.md](summary.md) |
-| Status | In progress |
+| Status | In review |
 
 ## Features implemented
 
@@ -30,19 +30,27 @@ On SIGTERM or SIGINT (`request_stop`):
 5. The background loop finishes the item in hand (`work.stop`).
 6. The server closes, the application shuts down, the database pool closes.
 
-Steps 4 and 5 share one budget, `SHUTDOWN_GRACE_SECONDS` (default 50). Past it the process exits
-anyway; work cut off is recovered by the next version through the Stage 3 leases. A second signal
-is ignored (Railway's SIGKILL is the hard stop).
+Steps 4 and 5 share one budget, `SHUTDOWN_GRACE_SECONDS` (default 50). Past it, handlers still
+running are cancelled before the database and HTTP client close, and the process exits; work cut
+off is recovered by the next version through the Stage 3 leases. A second signal is ignored
+(Railway's SIGKILL is the hard stop). A stop requested during start-up ends start-up early, before
+anything is fetched; `main.py` installs a SIGTERM handler first thing, because in a container
+Python is PID 1 and would otherwise ignore SIGTERM until the run loop's handler exists.
 
 ### Health check and webhook server (`bot/web.py`)
 A minimal HTTP/1.1 server on `asyncio.start_server`, no new dependency:
 
-- `GET /health`: 200 `ok` when updates are being fetched and `Database.ping` (`SELECT 1`, at most
-  5 s for a connection) succeeds; 503 with `starting`, `stopping` or `database unreachable` otherwise.
+- `GET`/`HEAD /health`: 200 `ok` when updates are being fetched and `Database.ping` succeeds; 503
+  with `starting`, `stopping` or `database unreachable` otherwise. The ping runs on its own single
+  thread (one at a time, however often `/health` is called), and connection wait, query
+  (`statement_timeout`) and the health check's own wait are each limited to 3 s.
 - `POST /telegram` (webhook mode only): checks `X-Telegram-Bot-Api-Secret-Token` with a
   constant-time comparison (403 if wrong), rejects bodies that are not an update (400), puts the
-  update on the application's queue and answers 200 at once.
-- Anything else: 404. A request must arrive within 10 s and be at most 1 MB.
+  update on the application's queue and answers 200 at once. Once shutdown has begun it answers
+  503, so Telegram resends the update (to the new version). An update python-telegram-bot cannot
+  read is logged and answered 200, so Telegram does not resend it forever.
+- Anything else: 404. A request must arrive within 10 s, with at most 100 header lines and a
+  body of at most 1 MB.
 
 ### Background work stops between items (`bot/handlers/work.py`)
 Stage 3's loop was cancelled on stop, possibly between Telegram accepting a message and the row
@@ -51,7 +59,7 @@ taking the next item, the 30 s sleep wakes on it, and `work.stop` waits for the 
 remaining grace) before cancelling it.
 
 ### Settings (`bot/config.py`, `.env.example`)
-`PORT`, `WEBHOOK_URL` (must be `https://`, needs `PORT`), `WEBHOOK_SECRET` (derived from the
+`PORT`, `WEBHOOK_URL` (must be `https://` with no path, needs `PORT`), `WEBHOOK_SECRET` (derived from the
 token with SHA-256 when empty; checked against Telegram's allowed characters),
 `SHUTDOWN_GRACE_SECONDS` (50), `TELEGRAM_API_URL` (a local Bot API server; also how the tests
 point the bot at a fake API).
@@ -87,6 +95,7 @@ point the bot at a fake API).
 | `tests/fake_bot_api.py` (new) | A fake Bot API over real HTTP (polling, webhook registration, messages). |
 | `tests/test_deploy.py` (new) | Stage 4 tests (see [testing.md](testing.md)). |
 | `README.md`, `.env.example` | Railway settings and the new variables. |
+| `Dockerfile` | `python:3.12-slim-bookworm` (was 3.11), the version CI tests on. |
 
 ## Schema and configuration changes
 

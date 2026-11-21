@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 
 WEBHOOK_PATH = "/telegram"
 MAX_BODY = 1_000_000          # Telegram updates are far smaller
+MAX_HEADERS = 100
 READ_TIMEOUT = 10             # seconds to receive one request
 
 
@@ -54,7 +55,9 @@ class WebServer:
     """Serves /health and, if `on_update` is given, the webhook."""
 
     def __init__(self, port: int, health: HealthState, host: str = "0.0.0.0",
-                 on_update: Callable[[dict], Awaitable[None]] | None = None, secret: str = ""):
+                 on_update: Callable[[dict], Awaitable[bool]] | None = None, secret: str = ""):
+        """`on_update` queues an update for handling; it returns False if the bot is shutting
+        down and can no longer take it, and the request then fails so that Telegram retries."""
         self.port, self.host = port, host
         self.health = health
         self.on_update = on_update
@@ -76,17 +79,18 @@ class WebServer:
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            status, body = await asyncio.wait_for(self._respond(reader), READ_TIMEOUT)
+            status, body, head_only = await asyncio.wait_for(self._respond(reader), READ_TIMEOUT)
         except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, ValueError):
-            status, body = HTTPStatus.BAD_REQUEST, {"error": "bad request"}
+            status, body, head_only = HTTPStatus.BAD_REQUEST, {"error": "bad request"}, False
         except Exception:
             log.exception("Error while answering an HTTP request")
-            status, body = HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"}
+            status, body, head_only = HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"}, False
         payload = json.dumps(body).encode()
         try:
             writer.write(
                 f"HTTP/1.1 {status.value} {status.phrase}\r\nContent-Type: application/json\r\n"
-                f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode() + payload
+                f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
+                + (b"" if head_only else payload)
             )
             await writer.drain()
         except ConnectionError:
@@ -94,11 +98,19 @@ class WebServer:
         finally:
             writer.close()
 
-    async def _respond(self, reader: asyncio.StreamReader) -> tuple[HTTPStatus, dict]:
+    async def _respond(self, reader: asyncio.StreamReader) -> tuple[HTTPStatus, dict, bool]:
+        request: dict[str, str] = {}
+        status, body = await self._route(reader, request)
+        return status, body, request.get("method") == "HEAD"
+
+    async def _route(self, reader: asyncio.StreamReader, request: dict) -> tuple[HTTPStatus, dict]:
         request_line = (await reader.readline()).decode("latin-1").strip()
         method, target, _ = request_line.split(" ", 2)
+        request["method"] = method
         headers: dict[str, str] = {}
         while (line := (await reader.readline()).decode("latin-1").strip()):
+            if len(headers) >= MAX_HEADERS:
+                raise ValueError("too many headers")
             name, _, value = line.partition(":")
             headers[name.strip().lower()] = value.strip()
         path = target.split("?", 1)[0]
@@ -121,7 +133,14 @@ class WebServer:
             update = json.loads(await reader.readexactly(length))
             if not isinstance(update, dict) or "update_id" not in update:
                 return HTTPStatus.BAD_REQUEST, {"error": "not an update"}
-            await self.on_update(update)  # queued for handling: answer at once
+            try:
+                taken = await self.on_update(update)  # queued for handling: answer at once
+            except Exception:
+                # Telegram would resend it forever; a malformed update is dropped instead.
+                log.exception("Dropped a webhook update that could not be read: %s", update.get("update_id"))
+                return HTTPStatus.OK, {"ok": False}
+            if not taken:  # shutdown began while the body was arriving
+                return HTTPStatus.SERVICE_UNAVAILABLE, {"error": "stopping"}
             return HTTPStatus.OK, {"ok": True}
 
         return HTTPStatus.NOT_FOUND, {"error": "not found"}

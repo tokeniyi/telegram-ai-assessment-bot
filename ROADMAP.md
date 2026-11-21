@@ -1,6 +1,6 @@
 # Roadmap
 
-The planned order of work on the bot. Stages 1 to 3 are done and Stage 4 is in progress. The stages
+The planned order of work on the bot. Stages 1 to 3 are done and Stage 4 is in review. The stages
 after it are proposals and can be reordered. What was built in each stage, and how it was tested,
 is in [docs/implementations](docs/implementations/README.md).
 
@@ -12,7 +12,7 @@ Stages 5 to 7 are independent of each other.
 | 1 | Saved answers survive restarts | ✅ Done ([#8](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/8)) |
 | 2 | Each Telegram update handled once | ✅ Done ([#10](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/10)) |
 | 3 | Work that survives a restart | ✅ Done ([#12](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/12)) |
-| 4 | Safer deploys | 🔧 In progress ([phase 04 docs](docs/implementations/phase-04/summary.md)) |
+| 4 | Safer deploys | 🔍 In review ([phase 04 docs](docs/implementations/phase-04/summary.md)) |
 | 5 | Visibility for the admin | Proposed |
 | 6 | Assessment features | Proposed |
 | 7 | Scale and limits | Proposed |

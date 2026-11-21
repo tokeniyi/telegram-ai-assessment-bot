@@ -15,6 +15,10 @@ import time
 from urllib.parse import parse_qs
 
 
+class Conflict(Exception):
+    """Telegram's answer to a getUpdates cut off by another one."""
+
+
 class FakeBotAPI:
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []
@@ -26,6 +30,8 @@ class FakeBotAPI:
         self._server = None
         self.port = 0
         self._new_updates = None
+        self._waiting = None
+        self.conflicts = 0  # getUpdates calls answered 409, as Telegram does to a second poller
 
     # ── control from tests ───────────────────────────────────────────────
     def push(self, update: dict) -> None:
@@ -68,9 +74,16 @@ class FakeBotAPI:
                 body = await reader.readexactly(int(headers.get("content-length", "0")))
                 method = target.rsplit("/", 1)[1]
                 params = self._parse(headers.get("content-type", ""), body)
-                result = await self._answer(method, params)
-                payload = json.dumps({"ok": True, "result": result}).encode()
-                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                try:
+                    result = await self._answer(method, params)
+                    status, payload = "200 OK", {"ok": True, "result": result}
+                except Conflict:
+                    status, payload = "409 Conflict", {
+                        "ok": False, "error_code": 409,
+                        "description": "Conflict: terminated by other getUpdates request; "
+                                       "make sure that only one bot instance is running"}
+                payload = json.dumps(payload).encode()
+                writer.write(f"HTTP/1.1 {status}\r\nContent-Type: application/json\r\n".encode()
                              + f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
                 await writer.drain()
         except (ConnectionError, asyncio.IncompleteReadError):
@@ -106,15 +119,25 @@ class FakeBotAPI:
         if method == "getMe":
             return {"id": 42, "is_bot": True, "first_name": "Bot", "username": "fake_bot"}
         if method == "getUpdates":
+            # Like Telegram: a new getUpdates ends the one still waiting with 409 Conflict, so two
+            # bots polling at once (a deploy overlap) keep cutting each other off.
+            if self._waiting is not None and not self._waiting.done():
+                self._waiting.set_result("conflict")
+            self._waiting = asyncio.get_running_loop().create_future()
+            mine = self._waiting
             offset = int(params.get("offset", 0) or 0)
             self.offsets.append(offset)
             self.updates = [u for u in self.updates if u["update_id"] >= offset]
             if not self.updates and float(params.get("timeout", 0) or 0) > 0:
                 self._new_updates.clear()
-                try:
-                    await asyncio.wait_for(self._new_updates.wait(), 0.3)
-                except asyncio.TimeoutError:
-                    pass
+                waiter = asyncio.ensure_future(self._new_updates.wait())
+                await asyncio.wait([waiter, mine], timeout=0.3, return_when=asyncio.FIRST_COMPLETED)
+                waiter.cancel()
+            if mine.done() and mine.result() == "conflict":
+                self.conflicts += 1
+                raise Conflict()
+            if not mine.done():
+                mine.set_result("served")
             return list(self.updates)
         if method in {"sendMessage", "editMessageText"}:
             self._message_id += 1

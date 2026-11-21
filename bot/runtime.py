@@ -21,6 +21,7 @@ import asyncio
 import logging
 import signal
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from telegram import Update
 from telegram.error import NetworkError
@@ -33,6 +34,7 @@ from .web import WEBHOOK_PATH, HealthState, WebServer
 log = logging.getLogger(__name__)
 
 INITIALIZE_ATTEMPTS = 5
+PING_TIMEOUT = 3  # seconds the health check waits for the database
 
 
 async def _initialize(application: Application) -> None:
@@ -59,9 +61,19 @@ class BotRunner:
         self.health = HealthState(self._database_ok)
         self.web: WebServer | None = None
         self._stop = asyncio.Event()
+        # Its own thread, so a hanging database never takes threads from OCR, and at most one
+        # ping runs at a time however often /health is called.
+        self._ping_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="health")
+        self._ping: asyncio.Future | None = None
 
     async def _database_ok(self) -> bool:
-        return await asyncio.to_thread(self.svc.db.ping)
+        if self._ping is None or self._ping.done():
+            self._ping = asyncio.get_running_loop().run_in_executor(
+                self._ping_pool, self.svc.db.ping, PING_TIMEOUT)
+        try:
+            return await asyncio.wait_for(asyncio.shield(self._ping), PING_TIMEOUT)
+        except asyncio.TimeoutError:
+            return False
 
     def request_stop(self) -> None:
         if self._stop.is_set():
@@ -73,20 +85,31 @@ class BotRunner:
             self.web.accepting_updates = False
         self._stop.set()
 
-    async def _put_update(self, data: dict) -> None:
+    async def _put_update(self, data: dict) -> bool:
+        if self._stop.is_set():  # the queue may already be closed: let Telegram resend it
+            return False
         await self.app.update_queue.put(Update.de_json(data, self.app.bot))
+        return True
 
     async def start(self) -> None:
+        """Start up; returns early if a stop is requested meanwhile."""
         await _initialize(self.app)
+        if self._stop.is_set():
+            return
         if self.app.post_init:
             await self.app.post_init(self.app)
+        if self._stop.is_set():
+            return
         if self.settings.port is not None:
             self.web = WebServer(
                 self.settings.port, self.health,
                 on_update=self._put_update if self.webhook else None,
                 secret=self.settings.webhook_secret,
             )
+            self.web.accepting_updates = self.webhook and not self._stop.is_set()
             await self.web.start()
+        if self._stop.is_set():
+            return
         await self.app.start()
         if self.webhook:
             await self.app.bot.set_webhook(
@@ -119,15 +142,27 @@ class BotRunner:
                 await asyncio.wait_for(self.app.stop(), left())  # handlers in progress finish
             except asyncio.TimeoutError:
                 log.warning("Updates still being handled after %s s; stopping anyway", grace)
+                await self._cancel_handlers()
             if self.app.post_stop:
                 await work.stop(self.app, timeout=left())
                 await self.app.post_stop(self.app)
         if self.web is not None:
             await self.web.stop()
+        self._ping_pool.shutdown(wait=False, cancel_futures=True)
         await self.app.shutdown()
         if self.app.post_shutdown:
             await self.app.post_shutdown(self.app)
         log.info("Stopped cleanly in %.1f s", time.monotonic() - started)
+
+    @staticmethod
+    async def _cancel_handlers() -> None:
+        """Cut off the handlers still running before the database and HTTP client close under
+        them. What they were doing is recovered by the next process (Stage 3 leases)."""
+        tasks = [t for t in asyncio.all_tasks()
+                 if t.get_name().startswith("Application:") and not t.done()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def run(self, install_signal_handlers: bool = True) -> None:
         loop = asyncio.get_running_loop()

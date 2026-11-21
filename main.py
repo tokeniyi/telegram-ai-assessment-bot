@@ -1,6 +1,7 @@
 """Entry point:  python main.py"""
 
 import logging
+import signal
 import sys
 
 from bot.app import build_application
@@ -9,6 +10,9 @@ from bot.config import ConfigError, load_settings
 
 
 def main() -> None:
+    # In a container this process is PID 1, which ignores SIGTERM unless it has a handler; until
+    # bot.runtime installs its own (once start-up is under way), a stop request simply exits.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
         settings = load_settings()
     except ConfigError as exc:

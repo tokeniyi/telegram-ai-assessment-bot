@@ -212,7 +212,7 @@ async def test_grading_in_progress_finishes_before_the_process_exits(start_bot, 
     assert len(api.offsets) == polls  # no getUpdates after the poller stopped
 
 
-async def test_shutdown_does_not_wait_past_the_grace_period(start_bot, api, pg_url):
+async def test_shutdown_does_not_wait_past_the_grace_period(start_bot, api, pg_url, caplog):
     """Work that would outlast SHUTDOWN_GRACE_SECONDS is left to the next process; its lease
     lets that process take it over (Stage 3)."""
     runner, task = await start_bot(shutdown_grace_seconds=1)
@@ -224,6 +224,7 @@ async def test_shutdown_does_not_wait_past_the_grace_period(start_bot, api, pg_u
     api.push(message_update(10, STUDENT_ID, "1. Water"))
     await until(lambda: any("Saved as your answer" in t for t in api.texts(STUDENT_ID)))
     runner.svc.ai.provider.complete = hang
+    caplog.set_level("ERROR")
     api.push(button_update(11, STUDENT_ID, f"ans:submit:{aid}"))
     await until(lambda: runner.svc.db.get_submission(1) is not None)
     started = time.monotonic()
@@ -234,6 +235,10 @@ async def test_shutdown_does_not_wait_past_the_grace_period(start_bot, api, pg_u
     submission = db.get_submission(1)
     db.close()
     assert submission["status"] == "pending" and submission["grading_claimed_until"] is not None
+    # the hanging handler was cut off before the database closed, not left to fail against it
+    assert "PoolClosed" not in caplog.text and "pool" not in caplog.text.lower()
+    leftover = [t for t in asyncio.all_tasks() if t.get_name().startswith("Application:") and not t.done()]
+    assert leftover == []  # nothing keeps running against a closed database and HTTP client
 
 
 async def test_sending_stops_after_the_message_in_hand_and_the_rest_is_left_queued(start_bot, api, pg_url):
@@ -324,6 +329,7 @@ async def test_a_deploy_handover_loses_nothing_and_handles_nothing_twice(start_b
     release.set()
     await asyncio.wait_for(old_task, 10)
 
+    assert api.conflicts > 0  # the two versions really did poll at the same time
     assert sum("registered users" in t for t in api.texts(ADMIN_ID)) == 1
     assert sum("<b>Assessments</b>" in t for t in api.texts(ADMIN_ID)) == 1
     results = [t for t in api.texts(STUDENT_ID) if "Result" in t]
@@ -379,6 +385,89 @@ def test_webhook_settings_are_checked(monkeypatch):
         load_settings()
 
 
+# ── found in review: edge cases ──────────────────────────────────────────
+async def test_a_webhook_update_arriving_across_sigterm_is_refused_not_lost(start_bot, api):
+    """Headers arrive, then SIGTERM, then the body: answering 200 would lose the update, since
+    the queue is already closing. 503 makes Telegram send it again (to the new version)."""
+    runner, task = await start_bot(webhook_url="https://bot.example.com", webhook_secret="s3cret")
+    body = json.dumps(message_update(1, STUDENT_ID, "/myid")).encode()
+    reader, writer = await asyncio.open_connection("127.0.0.1", runner.web.port)
+    writer.write(f"POST {WEBHOOK_PATH} HTTP/1.1\r\nHost: x\r\nContent-Length: {len(body)}\r\n"
+                 "X-Telegram-Bot-Api-Secret-Token: s3cret\r\n\r\n".encode())
+    await writer.drain()
+    await asyncio.sleep(0.1)
+    runner.request_stop()
+    await until(lambda: not runner.app.running)
+    writer.write(body)
+    await writer.drain()
+    response = await reader.read()
+    writer.close()
+    assert response.startswith(b"HTTP/1.1 503")
+    await asyncio.wait_for(task, 10)
+
+
+async def test_a_hanging_database_makes_health_fail_fast(start_bot, monkeypatch):
+    runner, _ = await start_bot()
+    release = __import__("threading").Event()
+    monkeypatch.setattr(runner.svc.db, "ping", lambda timeout: release.wait(20) and True)
+    started = time.monotonic()
+    assert await http(runner.web.port) == (503, {"status": "database unreachable"})
+    assert await http(runner.web.port) == (503, {"status": "database unreachable"})
+    assert time.monotonic() - started < 8  # about 3 s each, not the 10 s request timeout
+    release.set()
+    await until(lambda: runner._ping.done())
+    monkeypatch.undo()
+    assert await http(runner.web.port) == (200, {"status": "ok"})
+
+
+async def test_head_has_no_body_and_too_many_headers_are_refused(start_bot):
+    runner, _ = await start_bot()
+    reader, writer = await asyncio.open_connection("127.0.0.1", runner.web.port)
+    writer.write(b"HEAD /health HTTP/1.1\r\nHost: x\r\n\r\n")
+    raw = await reader.read()
+    writer.close()
+    assert raw.startswith(b"HTTP/1.1 200") and raw.endswith(b"\r\n\r\n")
+    many = {f"X-{i}": "y" for i in range(150)}
+    assert (await http(runner.web.port, headers=many))[0] == 400
+
+
+async def test_a_malformed_webhook_update_is_dropped_not_retried_forever(start_bot, api):
+    runner, _ = await start_bot(webhook_url="https://bot.example.com", webhook_secret="s3cret")
+    broken = json.dumps({"update_id": 5, "message": {"chat": "not a chat"}}).encode()
+    status, body = await http(runner.web.port, "POST", WEBHOOK_PATH, broken,
+                              {"X-Telegram-Bot-Api-Secret-Token": "s3cret"})
+    assert status == 200 and body == {"ok": False}
+    good = json.dumps(message_update(6, STUDENT_ID, "/myid")).encode()
+    assert (await http(runner.web.port, "POST", WEBHOOK_PATH, good,
+                       {"X-Telegram-Bot-Api-Secret-Token": "s3cret"}))[0] == 200
+    await until(lambda: any("Your Telegram ID" in t for t in api.texts(STUDENT_ID)))
+
+
+async def test_a_stop_during_start_up_does_not_start_fetching(pg_url, api):
+    application = build_application(make_settings(pg_url, telegram_api_url=api.url, port=0,
+                                                  webhook_url="https://bot.example.com"))
+    application.bot_data["services"].ocr.warm_up = lambda: None
+    runner = BotRunner(application)
+    post_init = application.post_init
+
+    async def stop_while_starting(app):
+        await post_init(app)
+        runner.request_stop()  # SIGTERM arrives during start-up
+
+    application.post_init = stop_while_starting
+    await asyncio.wait_for(runner.run(install_signal_handlers=False), 10)
+    assert "setWebhook" not in api.methods() and "getUpdates" not in api.methods()
+
+
+def test_a_webhook_url_with_a_path_is_refused(monkeypatch):
+    from bot.config import ConfigError, load_settings
+    for name, value in {"TELEGRAM_BOT_TOKEN": "123:abc", "AI_API_KEY": "k", "PORT": "8080",
+                        "WEBHOOK_URL": "https://bot.example.com/app"}.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(ConfigError, match="without a path"):
+        load_settings()
+
+
 # ── the real process ─────────────────────────────────────────────────────
 def free_port():
     with socket.socket() as s:
@@ -395,13 +484,30 @@ def health(port):
         return None
 
 
+def bot_env(pg_url, api, port):
+    return {**os.environ, "TELEGRAM_BOT_TOKEN": "123:TEST", "AI_API_KEY": "k", "ADMIN_IDS": str(ADMIN_ID),
+            "DATABASE_URL": pg_url, "TELEGRAM_API_URL": api.url, "PORT": str(port),
+            "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost",
+            "OCR_ENGINES": "rapidocr", "SHUTDOWN_GRACE_SECONDS": "20"}
+
+
+def test_main_py_exits_on_sigterm_even_while_starting(pg_url):
+    with ThreadedFakeBotAPI() as api:
+        proc = subprocess.Popen([sys.executable, "main.py"], cwd=ROOT, env=bot_env(pg_url, api, free_port()),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            time.sleep(0.5)  # still importing and loading settings
+            proc.send_signal(signal.SIGTERM)
+            assert proc.wait(timeout=30) == 0
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+
 def test_main_py_reports_healthy_and_exits_cleanly_on_sigterm(pg_url):
     port = free_port()
     with ThreadedFakeBotAPI() as api:
-        env = {**os.environ, "TELEGRAM_BOT_TOKEN": "123:TEST", "AI_API_KEY": "k", "ADMIN_IDS": str(ADMIN_ID),
-               "DATABASE_URL": pg_url, "TELEGRAM_API_URL": api.url, "PORT": str(port),
-               "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost",
-               "OCR_ENGINES": "rapidocr", "SHUTDOWN_GRACE_SECONDS": "20"}
+        env = bot_env(pg_url, api, port)
         proc = subprocess.Popen([sys.executable, "main.py"], cwd=ROOT, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:

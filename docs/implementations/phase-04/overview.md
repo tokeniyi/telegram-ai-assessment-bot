@@ -5,7 +5,7 @@
 | Roadmap stage | Stage 4 in [ROADMAP.md](../../../ROADMAP.md) |
 | Branch | `claude/lucid-brahmagupta-dri4yd` |
 | Pull request | see [summary.md](summary.md) |
-| Status | In progress |
+| Status | In review |
 
 ## Objective
 
