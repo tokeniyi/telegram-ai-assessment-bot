@@ -1,6 +1,6 @@
 # Roadmap
 
-The planned order of work on the bot. Stages 1 and 2 are done and Stage 3 is in review. The stages
+The planned order of work on the bot. Stages 1 to 3 are done and Stage 4 is in progress. The stages
 after it are proposals and can be reordered. What was built in each stage, and how it was tested,
 is in [docs/implementations](docs/implementations/README.md).
 
@@ -11,8 +11,8 @@ Stages 5 to 7 are independent of each other.
 |---|---|---|
 | 1 | Saved answers survive restarts | ✅ Done ([#8](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/8)) |
 | 2 | Each Telegram update handled once | ✅ Done ([#10](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/10)) |
-| 3 | Work that survives a restart | 🔍 In review ([phase 03 docs](docs/implementations/phase-03/summary.md)) |
-| 4 | Safer deploys | Planned |
+| 3 | Work that survives a restart | ✅ Done ([#12](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/12)) |
+| 4 | Safer deploys | 🔧 In progress ([phase 04 docs](docs/implementations/phase-04/summary.md)) |
 | 5 | Visibility for the admin | Proposed |
 | 6 | Assessment features | Proposed |
 | 7 | Scale and limits | Proposed |
@@ -42,25 +42,20 @@ before any other handler runs, in any process.
 
 Not covered: two taps are two different updates, so they are not merged here (see Stage 3).
 
+### Stage 3: Work that survives a restart ([#12](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/12))
+
+Sending an assessment and grading no longer run only inside the handler that started them.
+Publishing writes one `deliveries` row per student in the same transaction as the status change
+(`UPDATE … WHERE status = 'draft' RETURNING`), so a double tap publishes once. Each message and
+each grading run is leased to one process; on start and every 30 seconds the bot finishes what is
+left, with retry limits. Details: [phase 03](docs/implementations/phase-03/summary.md).
+
+Left for later: a process killed between Telegram accepting a message and the row being marked
+sent sends it again after the lease (see Stage 4).
+
 ---
 
 ## Next
-
-### Stage 3: Work that survives a restart
-
-Today, slow work runs inside the handler that started it. A restart or redeploy in the middle loses
-it, and nothing picks it up again.
-
-| Problem | What happens today | Planned fix |
-|---|---|---|
-| Sending an assessment out | Students receive it one by one (`_broadcast` in `bot/handlers/admin.py`). A restart halfway through leaves the rest without it, and nothing resumes. | Store one "to send" row per student when the admin publishes, and mark each row sent. On start, the bot finishes any unsent rows. |
-| Grading | A restart mid-grading leaves the submission `pending` until an admin runs `/regrade`. | On start, regrade stale `pending` submissions automatically, with a retry limit, then send the student the result. |
-| Two quick taps on "Send to all users" | `on_draft_button` checks the status and then sets it in a separate step. Two taps both pass the check, so everyone receives the assessment twice. Stage 2 does not catch this: each tap is a different update. | Change the status in one database step (`UPDATE … WHERE status = 'draft' RETURNING`), so only one tap goes through. |
-
-The double-tap fix is small and can ship on its own first.
-
-Done when: a restart during sending or grading needs no admin action, and no student receives an
-assessment twice.
 
 ### Stage 4: Safer deploys
 

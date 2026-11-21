@@ -85,6 +85,9 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def build_application(settings: Settings, builder: ApplicationBuilder | None = None) -> Application:
     builder = builder or ApplicationBuilder()
+    if settings.telegram_api_url:  # a local Bot API server (https://github.com/tdlib/telegram-bot-api)
+        builder = (builder.base_url(f"{settings.telegram_api_url}/bot")
+                   .base_file_url(f"{settings.telegram_api_url}/file/bot"))
     application = (
         builder.token(settings.telegram_bot_token)
         .concurrent_updates(True)  # an AI call for one user must not block everyone else

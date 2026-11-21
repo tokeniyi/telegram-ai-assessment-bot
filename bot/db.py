@@ -149,6 +149,12 @@ class Database:
         with self._pool.connection() as conn:
             conn.execute(query, params)
 
+    def ping(self) -> bool:
+        """Whether the database answers (for the health check). Waits at most 5 s for a
+        connection, so a health request never hangs."""
+        with self._pool.connection(timeout=5) as conn:
+            return conn.execute("SELECT 1 AS ok").fetchone()["ok"] == 1
+
     # ── processed Telegram updates ───────────────────────────────────────
     def claim_update(self, bot_id: int, update_id: int) -> bool:
         """Record that this update is being handled. Returns False if it was already claimed,

@@ -109,6 +109,8 @@ them too, so you can test the whole flow from a single account.
 main.py                 entry point
 bot/config.py           reads and validates .env
 bot/app.py              builds the Telegram application
+bot/runtime.py          start-up, polling or webhook, and the clean shutdown on SIGTERM
+bot/web.py              the /health endpoint and the webhook receiver
 bot/db.py               PostgreSQL storage (users, assessments, questions, submissions)
 bot/extract.py          PDF / DOCX / text extraction for files that have a text layer
 bot/ocr/                OCR pipeline for scanned PDFs and images (see below)
@@ -116,13 +118,37 @@ bot/ai/providers.py     Anthropic and OpenAI-compatible providers
 bot/ai/service.py       prompts, question generation, grading, reply validation
 bot/handlers/           admin, user and shared Telegram handlers; uploads.py routes every file
                         and photo, reading.py downloads and reads them, explain.py is /explain,
-                        chat.py routes typed messages (chat, answer or review)
+                        chat.py routes typed messages (chat, answer or review),
+                        work.py sends assessments and grades in the background
 tests/                  offline tests with a fake Telegram API and a fake AI
 ```
 
 Data is stored in PostgreSQL (set `DATABASE_URL`; the tables are created on first run). Submissions are saved before
 grading, so an answer is never lost if the AI call fails. Each Telegram update is recorded before it
 is handled, so one that Telegram sends again (after a crash, or during a deploy) is not handled twice.
+
+## Deploying (Railway)
+
+The bot runs as one service from the `Dockerfile`. During a deploy, Railway starts the new
+version while the old one still runs, then stops the old one. Three service settings make that
+handover clean; set them in the Railway dashboard (service → Settings / Variables):
+
+| Setting | Value | Why |
+|---|---|---|
+| Healthcheck path | `/health` | Railway switches to the new version only once it answers 200, i.e. it is receiving updates and reaches the database. Railway sets `PORT`; the bot listens on it. |
+| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `60` | Time between SIGTERM and the forced kill of the old version. Railway's default is 0, which kills it at once and cuts off grading in progress. Keep it above `SHUTDOWN_GRACE_SECONDS` (50 by default). |
+| `RAILWAY_DEPLOYMENT_OVERLAP_SECONDS` | `0` (or unset) | How long the old version keeps running after the new one is active. Longer means more time with two bots fetching updates. |
+
+On SIGTERM the bot stops fetching updates, reports unhealthy, finishes the updates and the
+message or grading in hand (at most `SHUTDOWN_GRACE_SECONDS`), then exits. Work cut off by a kill is
+picked up by the next version (see Stage 3).
+
+**Optional: webhook instead of polling.** With polling, both versions fetch updates for the few
+seconds they overlap. With `WEBHOOK_URL` set to the service's public HTTPS address (for example
+`https://<service>.up.railway.app`, from service → Settings → Networking → Generate Domain),
+Telegram sends each update to `/telegram`, and Railway routes it to one version only. The request
+must carry a secret (`WEBHOOK_SECRET`, derived from the bot token if not set). Removing
+`WEBHOOK_URL` goes back to polling; the webhook is removed on the next start.
 
 ## OCR: scanned PDFs and photos
 

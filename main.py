@@ -3,9 +3,8 @@
 import logging
 import sys
 
-from telegram import Update
-
 from bot.app import build_application
+from bot.runtime import run
 from bot.config import ConfigError, load_settings
 
 
@@ -23,8 +22,9 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpx2").setLevel(logging.WARNING)
 
-    application = build_application(settings)
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Polls Telegram, or receives a webhook if WEBHOOK_URL is set; serves /health on PORT.
+    # Stops cleanly on SIGTERM (see bot/runtime.py).
+    run(build_application(settings))
 
 
 if __name__ == "__main__":
