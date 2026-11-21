@@ -149,6 +149,13 @@ class Database:
         with self._pool.connection() as conn:
             conn.execute(query, params)
 
+    def ping(self, timeout: float = 3) -> bool:
+        """Whether the database answers (for the health check), within about `timeout`
+        seconds: both getting a connection and the query itself are bounded."""
+        with self._pool.connection(timeout=timeout) as conn:
+            conn.execute("SELECT set_config('statement_timeout', %s, true)", (f"{int(timeout * 1000)}ms",))
+            return conn.execute("SELECT 1 AS ok").fetchone()["ok"] == 1
+
     # ── processed Telegram updates ───────────────────────────────────────
     def claim_update(self, bot_id: int, update_id: int) -> bool:
         """Record that this update is being handled. Returns False if it was already claimed,

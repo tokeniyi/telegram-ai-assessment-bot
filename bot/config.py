@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -61,6 +63,12 @@ class Settings:
     allow_chat: bool = True
     chat_history_turns: int = 8
     ocr: OCRConfig = field(default_factory=OCRConfig)
+    # Deploys (Stage 4). `port` serves /health (and the webhook); None serves nothing.
+    port: int | None = None
+    webhook_url: str | None = None     # https://… ; None polls Telegram instead
+    webhook_secret: str = ""
+    shutdown_grace_seconds: int = 50
+    telegram_api_url: str | None = None  # a local Bot API server; None is api.telegram.org
 
     def is_admin(self, user_id: int | None) -> bool:
         return user_id is not None and user_id in self.admin_ids
@@ -175,6 +183,20 @@ def load_settings(env_file: Path | None = None) -> Settings:
     if not database_url.startswith(("postgresql://", "postgres://")):
         problems.append("DATABASE_URL is required, e.g. postgresql://user:password@localhost:5432/assessment_bot")
 
+    port = _int("PORT", 0, minimum=0) or None
+    webhook_url = _get("WEBHOOK_URL").rstrip("/") or None
+    if webhook_url and not webhook_url.startswith("https://"):
+        problems.append("WEBHOOK_URL must start with https:// (Telegram only calls HTTPS webhooks)")
+    elif webhook_url and "/" in webhook_url[len("https://"):]:
+        problems.append("WEBHOOK_URL must be the address only, without a path "
+                        "(e.g. https://my-bot.up.railway.app); the bot adds /telegram")
+    if webhook_url and port is None:
+        problems.append("WEBHOOK_URL needs PORT, the port the bot listens on (Railway sets it)")
+    webhook_secret = _get("WEBHOOK_SECRET") or (
+        hashlib.sha256(f"webhook:{token}".encode()).hexdigest() if token else "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", webhook_secret or "x"):
+        problems.append("WEBHOOK_SECRET may only contain A-Z, a-z, 0-9, _ and - (at most 256)")
+
     if problems:
         raise ConfigError(
             "Configuration problem(s) in .env:\n  - " + "\n  - ".join(problems)
@@ -202,4 +224,9 @@ def load_settings(env_file: Path | None = None) -> Settings:
         allow_chat=_bool("ALLOW_CHAT", True),
         chat_history_turns=_int("CHAT_HISTORY_TURNS", 8, minimum=0),
         ocr=_ocr_config(provider),
+        port=port,
+        webhook_url=webhook_url,
+        webhook_secret=webhook_secret,
+        shutdown_grace_seconds=_int("SHUTDOWN_GRACE_SECONDS", 50, minimum=0),
+        telegram_api_url=_get("TELEGRAM_API_URL").rstrip("/") or None,
     )

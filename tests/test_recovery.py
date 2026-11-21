@@ -373,7 +373,7 @@ async def test_background_work_survives_an_error_and_stops_cleanly(harness, monk
     assert calls and not task.done()  # the error was logged, the loop goes on
     assert "Background sending failed" in caplog.text
     await work.stop(h.app)
-    assert task.cancelled() and "work_task" not in h.app.bot_data
+    assert task.done() and not task.cancelled() and "work_task" not in h.app.bot_data  # finished, not cut off
 
 
 # ── found in review: edge cases ──────────────────────────────────────────
@@ -518,7 +518,7 @@ async def test_shutdown_stops_the_background_work_even_without_stop(harness):
     work.start(h.app)
     task = h.app.bot_data["work_task"]
     await h.app.post_shutdown(h.app)
-    assert task.cancelled()
+    assert task.done()
 
 
 # ── the database side ────────────────────────────────────────────────────

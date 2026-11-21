@@ -1,4 +1,5 @@
-FROM python:3.11-slim-bookworm
+# Same Python version as CI (.github/workflows/tests.yml)
+FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

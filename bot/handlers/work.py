@@ -86,10 +86,10 @@ async def deliver(bot: Bot, svc: Services, assessment_id: int | None = None) -> 
     db = svc.db
     blocks_cache: dict[int, list[str]] = {}
     attempted = 0
-    while True:
+    while not svc.stopping.is_set():  # when stopping, the next process sends the rest
         row = db.claim_delivery(DELIVERY_LEASE, assessment_id)
         if row is None:
-            return attempted
+            break
         attempted += 1
         aid, user_id = row["assessment_id"], row["user_id"]
         if aid not in blocks_cache:
@@ -110,6 +110,7 @@ async def deliver(bot: Bot, svc: Services, assessment_id: int | None = None) -> 
         else:
             db.finish_delivery(aid, user_id, "sent")
         await asyncio.sleep(SEND_DELAY)
+    return attempted
 
 
 def delivery_report(assessment_id: int, counts: dict[str, int]) -> str:
@@ -204,7 +205,7 @@ async def recover_grading(bot: Bot, svc: Services) -> int:
     Returns how many submissions were handled."""
     lease = grading_lease(svc)
     handled = 0
-    while (claim := svc.db.claim_stale_grading(lease, MAX_GRADING_ATTEMPTS)) is not None:
+    while not svc.stopping.is_set() and (claim := svc.db.claim_stale_grading(lease, MAX_GRADING_ATTEMPTS)) is not None:
         outcome, submission = claim
         handled += 1
         aid = submission["assessment_id"]
@@ -227,7 +228,7 @@ async def recover_grading(bot: Bot, svc: Services) -> int:
         if blocks is not None:
             await send_result(bot, svc, submission, blocks)
 
-    while (submission := svc.db.claim_unsent_result(RESULT_GRACE)) is not None:
+    while not svc.stopping.is_set() and (submission := svc.db.claim_unsent_result(RESULT_GRACE)) is not None:
         handled += 1
         log.info("Sending the result of submission %s, which was graded but never sent", submission["id"])
         try:
@@ -253,9 +254,12 @@ async def run_once(bot: Bot, svc: Services) -> None:
 
 async def run_forever(application: Application, interval: float = WORK_INTERVAL) -> None:
     svc: Services = application.bot_data["services"]
-    while True:
+    while not svc.stopping.is_set():
         await run_once(application.bot, svc)
-        await asyncio.sleep(interval)
+        try:  # sleep, but wake at once when the bot starts shutting down
+            await asyncio.wait_for(svc.stopping.wait(), interval)
+        except asyncio.TimeoutError:
+            pass
 
 
 def start(application: Application) -> None:
@@ -264,13 +268,27 @@ def start(application: Application) -> None:
     )
 
 
-async def stop(application: Application) -> None:
+async def stop(application: Application, timeout: float | None = None) -> None:
+    """Stop the background loop. It finishes the message or grading in hand (up to `timeout`
+    seconds, default SHUTDOWN_GRACE_SECONDS) and takes no new work; past the timeout it is
+    cancelled, and the leases let the next process redo what was cut off."""
+    svc: Services = application.bot_data["services"]
+    svc.stopping.set()
     task = application.bot_data.pop("work_task", None)
     if task is None:
+        return
+    if timeout is None:
+        timeout = svc.settings.shutdown_grace_seconds
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+        return
+    except asyncio.TimeoutError:
+        log.warning("Background work did not finish within %s s; stopping it", timeout)
+    except Exception:
+        log.exception("Background work failed while stopping")
         return
     task.cancel()
     try:
         await task
     except asyncio.CancelledError:
         pass
-
