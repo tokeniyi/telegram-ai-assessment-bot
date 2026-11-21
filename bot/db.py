@@ -80,10 +80,34 @@ CREATE TABLE IF NOT EXISTS processed_updates (
     PRIMARY KEY (bot_id, update_id)
 );
 CREATE INDEX IF NOT EXISTS idx_processed_updates_received ON processed_updates(received_at);
+-- One row per user who should receive a published assessment (an outbox). Publishing writes
+-- every row in the same transaction that changes the status, and each row is marked once its
+-- message is sent, so a restart in the middle of sending leaves a list of who is still owed it.
+CREATE TABLE IF NOT EXISTS deliveries (
+    assessment_id  BIGINT NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+    user_id        BIGINT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'pending',  -- pending | sent | blocked | failed | cancelled
+    attempts       INTEGER NOT NULL DEFAULT 0,
+    claimed_until  TIMESTAMPTZ,                      -- a process is sending it until then
+    last_error     TEXT,
+    sent_at        TIMESTAMPTZ,
+    PRIMARY KEY (assessment_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_pending ON deliveries(assessment_id, user_id) WHERE status = 'pending';
+-- Stage 3 columns, added in place so that an existing database is upgraded on start.
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS published_by BIGINT;
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS delivery_reported_at TIMESTAMPTZ;
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS grading_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS grading_claimed_until TIMESTAMPTZ;
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS result_sent_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_submissions_pending ON submissions(id) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_questions_assessment ON questions(assessment_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_lookup ON submissions(assessment_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_draft_answers_user ON draft_answers(user_id, id);
 """
+
+
+SCHEMA_LOCK = 0x7465_6C65  # any constant shared by every bot process
 
 
 def _now() -> str:
@@ -102,6 +126,9 @@ class Database:
         )
         self._pool.wait()
         with self._pool.connection() as conn:
+            # Two bot versions start at once during a deploy; creating and altering the same
+            # tables concurrently can fail, so the schema is applied by one process at a time.
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK,))
             conn.execute(SCHEMA)
 
     def close(self) -> None:
@@ -177,11 +204,19 @@ class Database:
             self._insert_questions(conn, assessment_id, questions)
         return assessment_id
 
-    def replace_questions(self, assessment_id: int, title: str, questions: list[dict[str, Any]]) -> None:
+    def replace_questions(self, assessment_id: int, title: str, questions: list[dict[str, Any]]) -> bool:
+        """Swap a draft's questions. Returns False, changing nothing, if it is no longer a draft
+        (published or discarded while the new questions were being generated)."""
         with self._pool.connection() as conn:
+            draft = conn.execute(
+                "UPDATE assessments SET title = %s WHERE id = %s AND status = 'draft' RETURNING id",
+                (title, assessment_id),
+            ).fetchone()
+            if draft is None:
+                return False
             conn.execute("DELETE FROM questions WHERE assessment_id = %s", (assessment_id,))
-            conn.execute("UPDATE assessments SET title = %s WHERE id = %s", (title, assessment_id))
             self._insert_questions(conn, assessment_id, questions)
+            return True
 
     @staticmethod
     def _insert_questions(conn, assessment_id: int, questions: list[dict[str, Any]]) -> None:
@@ -218,6 +253,122 @@ class Database:
     def delete_assessment(self, assessment_id: int) -> None:
         self._run("DELETE FROM assessments WHERE id = %s", (assessment_id,))
 
+    def discard_draft_assessment(self, assessment_id: int) -> bool:
+        """Delete the assessment if it is still a draft. Returns whether it was."""
+        return self._one(
+            "DELETE FROM assessments WHERE id = %s AND status = 'draft' RETURNING id", (assessment_id,)
+        ) is not None
+
+    def publish_assessment(self, assessment_id: int, published_by: int) -> int | None:
+        """Publish a draft and queue it for every active user, exactly once.
+
+        Returns the number of users queued, or None if the assessment is not a draft any more
+        (a second tap, a copy from another process, or it was discarded). The status change and
+        the queue are written in one transaction, so a restart cannot leave one without the other.
+        """
+        with self._pool.connection() as conn:
+            published = conn.execute(
+                """UPDATE assessments SET status = 'published', published_at = %s, published_by = %s
+                   WHERE id = %s AND status = 'draft' RETURNING id""",
+                (_now(), published_by, assessment_id),
+            ).fetchone()
+            if published is None:
+                return None
+            return conn.execute(
+                """INSERT INTO deliveries (assessment_id, user_id)
+                   SELECT %s, user_id FROM users WHERE is_active ORDER BY user_id
+                   ON CONFLICT DO NOTHING""",
+                (assessment_id,),
+            ).rowcount
+
+    def close_assessment(self, assessment_id: int) -> bool:
+        """Stop accepting answers. Users not sent the assessment yet will not be. Returns False
+        if it was not open."""
+        with self._pool.connection() as conn:
+            closed = conn.execute(
+                "UPDATE assessments SET status = 'closed' WHERE id = %s AND status = 'published' RETURNING id",
+                (assessment_id,),
+            ).fetchone()
+            if closed is None:
+                return False
+            conn.execute(
+                "UPDATE deliveries SET status = 'cancelled', claimed_until = NULL "
+                "WHERE assessment_id = %s AND status = 'pending'",
+                (assessment_id,),
+            )
+            return True
+
+    # ── deliveries: the published assessment, sent to each user once ────
+    def claim_delivery(self, lease_seconds: float, assessment_id: int | None = None) -> dict[str, Any] | None:
+        """Take the next message to send, so that no other process sends it while it is leased.
+
+        Rows whose lease ran out (the process sending them stopped) can be taken again.
+        """
+        only = "AND d.assessment_id = %s" if assessment_id is not None else ""
+        params = (lease_seconds,) + ((assessment_id,) if assessment_id is not None else ())
+        return self._one(
+            f"""UPDATE deliveries d SET attempts = d.attempts + 1,
+                       claimed_until = now() + make_interval(secs => %s)
+                FROM (SELECT d.assessment_id, d.user_id FROM deliveries d
+                      JOIN assessments a ON a.id = d.assessment_id AND a.status = 'published'
+                      WHERE d.status = 'pending' AND (d.claimed_until IS NULL OR d.claimed_until < now()) {only}
+                      ORDER BY d.assessment_id, d.user_id LIMIT 1
+                      FOR UPDATE OF d SKIP LOCKED) next
+                WHERE d.assessment_id = next.assessment_id AND d.user_id = next.user_id
+                RETURNING d.*""",
+            params,
+        )
+
+    def finish_delivery(self, assessment_id: int, user_id: int, status: str, error: str | None = None) -> None:
+        """Record the outcome of a claimed delivery: 'sent', 'blocked' or 'failed'."""
+        self._run(
+            """UPDATE deliveries SET status = %s, last_error = %s, claimed_until = NULL,
+                      sent_at = CASE WHEN %s = 'sent' THEN now() END
+               WHERE assessment_id = %s AND user_id = %s AND status = 'pending'""",
+            (status, error, status, assessment_id, user_id),
+        )
+
+    def retry_delivery_later(
+        self, assessment_id: int, user_id: int, delay_seconds: float, max_attempts: int, error: str
+    ) -> str:
+        """A send failed for a reason that may pass. Try again after `delay_seconds`, unless it
+        has been tried `max_attempts` times. Returns the new status ('pending' or 'failed')."""
+        row = self._one(
+            """UPDATE deliveries SET last_error = %s,
+                      status = CASE WHEN attempts >= %s THEN 'failed' ELSE 'pending' END,
+                      claimed_until = now() + make_interval(secs => %s)
+               WHERE assessment_id = %s AND user_id = %s AND status = 'pending' RETURNING status""",
+            (error, max_attempts, delay_seconds, assessment_id, user_id),
+        )
+        return row["status"] if row else "pending"
+
+    def delivery_counts(self, assessment_id: int) -> dict[str, int]:
+        rows = self._all(
+            "SELECT status, COUNT(*) AS n FROM deliveries WHERE assessment_id = %s GROUP BY status",
+            (assessment_id,),
+        )
+        return {r["status"]: r["n"] for r in rows}
+
+    def claim_delivery_reports(self, assessment_id: int | None = None) -> list[dict[str, Any]]:
+        """Assessments whose sending has finished and whose publisher has not been told yet.
+
+        Each is returned once, to one caller, with its delivery counts.
+        """
+        only = "AND a.id = %s" if assessment_id is not None else ""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"""UPDATE assessments a SET delivery_reported_at = now()
+                    WHERE a.delivery_reported_at IS NULL {only}
+                      AND EXISTS (SELECT 1 FROM deliveries d WHERE d.assessment_id = a.id)
+                      AND NOT EXISTS (SELECT 1 FROM deliveries d
+                                      WHERE d.assessment_id = a.id AND d.status = 'pending')
+                    RETURNING a.id, a.title, a.published_by, a.created_by""",
+                (assessment_id,) if assessment_id is not None else (),
+            ).fetchall()
+        for row in rows:
+            row["counts"] = self.delivery_counts(row["id"])
+        return rows
+
     def list_assessments(self, limit: int = 20) -> list[dict[str, Any]]:
         return self._all(
             """SELECT a.id, a.title, a.status, a.created_at,
@@ -248,15 +399,90 @@ class Database:
 
     def save_grade(
         self, submission_id: int, score: float, max_score: float, feedback: str, details: list[dict]
-    ) -> None:
-        self._run(
+    ) -> bool:
+        """Store the grade. Returns False, changing nothing, if the submission was already graded
+        (by another process that picked it up too), so only one result is ever sent."""
+        return self._one(
             """UPDATE submissions SET status = 'graded', score = %s, max_score = %s, feedback = %s,
-                      details = %s, graded_at = %s WHERE id = %s""",
+                      details = %s, graded_at = %s, grading_claimed_until = NULL
+               WHERE id = %s AND status != 'graded' RETURNING id""",
             (score, max_score, feedback, json.dumps(details), _now(), submission_id),
-        )
+        ) is not None
 
     def mark_submission_failed(self, submission_id: int) -> None:
-        self._run("UPDATE submissions SET status = 'failed' WHERE id = %s", (submission_id,))
+        self._run(
+            "UPDATE submissions SET status = 'failed', grading_claimed_until = NULL "
+            "WHERE id = %s AND status != 'graded'",
+            (submission_id,),
+        )
+
+    # ── grading that survives a restart ──────────────────────────────────
+    # A submission being graded is leased: grading_claimed_until says until when the process that
+    # took it is expected to finish. A 'pending' submission whose lease ran out was abandoned (the
+    # process stopped) and may be taken again. Rows written before leases existed have none; their
+    # creation time plus one lease stands in for it.
+    _STALE = "COALESCE(grading_claimed_until, created_at::timestamptz + make_interval(secs => %s)) < now()"
+
+    def claim_stale_grading(self, lease_seconds: float, max_attempts: int) -> tuple[str, dict[str, Any]] | None:
+        """Take the next abandoned 'pending' submission.
+
+        Returns ("claimed", row) when it should be graded now (its lease is renewed), ("gave_up",
+        row) when it has already been tried `max_attempts` times (it is marked 'failed' for
+        /regrade), or None when there is nothing to recover.
+        """
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"""SELECT * FROM submissions WHERE status = 'pending' AND {self._STALE}
+                    ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED""",
+                (lease_seconds,),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["grading_attempts"] >= max_attempts:
+                conn.execute("UPDATE submissions SET status = 'failed', grading_claimed_until = NULL "
+                             "WHERE id = %s", (row["id"],))
+                return "gave_up", row
+            row = conn.execute(
+                """UPDATE submissions SET grading_attempts = grading_attempts + 1,
+                          grading_claimed_until = now() + make_interval(secs => %s)
+                   WHERE id = %s RETURNING *""",
+                (lease_seconds, row["id"]),
+            ).fetchone()
+            return "claimed", row
+
+    def claim_for_regrade(self, submission_id: int, lease_seconds: float) -> bool:
+        """Take a submission for /regrade: a failed one, or a pending one nobody is grading.
+        Returns False if it is graded or another process is grading it right now."""
+        return self._one(
+            f"""UPDATE submissions SET status = 'pending', grading_attempts = grading_attempts + 1,
+                       grading_claimed_until = now() + make_interval(secs => %s)
+                WHERE id = %s AND (status = 'failed' OR (status = 'pending' AND {self._STALE}))
+                RETURNING id""",
+            (lease_seconds, submission_id, lease_seconds),
+        ) is not None
+
+    def mark_result_sent(self, submission_id: int) -> None:
+        """Record that the user has the result of this graded submission."""
+        self._run("UPDATE submissions SET result_sent_at = now() WHERE id = %s AND result_sent_at IS NULL",
+                  (submission_id,))
+
+    def claim_unsent_result(self, grace_seconds: float) -> dict[str, Any] | None:
+        """A graded submission whose result was never sent (the process stopped or Telegram
+        failed between saving the grade and sending it), graded more than `grace_seconds` ago.
+        It is marked as sent before it is returned, so this retry happens at most once.
+
+        Only submissions graded by this version (grading_attempts > 0) are considered, so results
+        that an older version already sent are not sent again.
+        """
+        return self._one(
+            """UPDATE submissions SET result_sent_at = now() WHERE id = (
+                   SELECT id FROM submissions
+                   WHERE status = 'graded' AND result_sent_at IS NULL AND grading_attempts > 0
+                     AND graded_at::timestamptz < now() - make_interval(secs => %s)
+                   ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)
+               RETURNING *""",
+            (grace_seconds,),
+        )
 
     def get_submission(self, submission_id: int) -> dict[str, Any] | None:
         return self._one("SELECT * FROM submissions WHERE id = %s", (submission_id,))
@@ -368,7 +594,9 @@ class Database:
             self._lock_session(conn, user_id)
             return conn.execute("DELETE FROM draft_answers WHERE user_id = %s", (user_id,)).rowcount > 0
 
-    def submit_draft(self, user_id: int, assessment_id: int, allow_resubmission: bool) -> tuple[str, int | None]:
+    def submit_draft(
+        self, user_id: int, assessment_id: int, allow_resubmission: bool, lease_seconds: float = 600,
+    ) -> tuple[str, int | None]:
         """Turn the user's draft for `assessment_id` into a submission, exactly once.
 
         Returns ("submitted", submission_id), ("empty", None) when there is no draft for it
@@ -376,6 +604,9 @@ class Database:
         no longer accepts this user's answers; the draft is then discarded. Checking, inserting
         the submission and deleting the draft happen in one transaction under the user's lock,
         so repeated or concurrent submits create at most one submission.
+
+        The new submission is leased to the caller for `lease_seconds` (see claim_stale_grading):
+        if the caller stops before grading it, another process grades it once the lease runs out.
         """
         with self._pool.connection() as conn:
             self._lock_session(conn, user_id)
@@ -398,9 +629,10 @@ class Database:
             if assessment is None or assessment["status"] != "published" or already:
                 return "closed", None
             submission_id = conn.execute(
-                """INSERT INTO submissions (assessment_id, user_id, raw_text, created_at)
-                   VALUES (%s, %s, %s, %s) RETURNING id""",
-                (assessment_id, user_id, "\n".join(parts), _now()),
+                """INSERT INTO submissions (assessment_id, user_id, raw_text, created_at,
+                                            grading_attempts, grading_claimed_until)
+                   VALUES (%s, %s, %s, %s, 1, now() + make_interval(secs => %s)) RETURNING id""",
+                (assessment_id, user_id, "\n".join(parts), _now(), lease_seconds),
             ).fetchone()["id"]
             return "submitted", submission_id
 

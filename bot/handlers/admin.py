@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import csv
 import io
 import json
@@ -11,7 +10,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ChatAction, ParseMode
-from telegram.error import Forbidden, RetryAfter, TelegramError
+from telegram.error import TelegramError
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes, filters,
 )
@@ -21,13 +20,12 @@ from ..extract import SUPPORTED_DESCRIPTION
 from ..utils import (
     display_name, esc, num, percent, question_blocks, send_blocks, services, total_points,
 )
-from . import student
+from . import student, work
 from .reading import read_upload
 
 log = logging.getLogger(__name__)
 
 PRIVATE = filters.ChatType.PRIVATE
-BROADCAST_DELAY = 0.05  # seconds between messages; keeps well under Telegram's ~30 msg/s limit
 
 
 def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -153,7 +151,10 @@ async def on_draft_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = query.message.chat_id
 
     if action == "del":
-        svc.db.delete_assessment(assessment_id)
+        if not svc.db.discard_draft_assessment(assessment_id):
+            await query.answer("This draft was already published or discarded.", show_alert=True)
+            await query.edit_message_reply_markup(None)
+            return
         await query.answer("Discarded")
         await query.edit_message_reply_markup(None)
         await context.bot.send_message(chat_id, f"🗑 Draft #{assessment_id} was discarded. No assessment was sent.")
@@ -169,44 +170,28 @@ async def on_draft_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 chat_id, f"❌ Could not regenerate: {exc}", reply_markup=_draft_keyboard(assessment_id)
             )
             return
-        svc.db.replace_questions(assessment_id, title, questions)
+        if not svc.db.replace_questions(assessment_id, title, questions):
+            await context.bot.send_message(
+                chat_id, f"Draft #{assessment_id} was published or discarded while the new questions "
+                         "were being written, so they were not used."
+            )
+            return
         await _send_preview(context, chat_id, assessment_id)
 
     elif action == "pub":
-        svc.db.set_status(assessment_id, "published")  # before sending, so a second tap is a no-op
+        # One database step changes the status and queues the messages, so of two taps (or two
+        # bot processes) only one gets past this line.
+        queued = svc.db.publish_assessment(assessment_id, update.effective_user.id)
+        if queued is None:
+            await query.answer("This draft was already published or discarded.", show_alert=True)
+            await query.edit_message_reply_markup(None)
+            return
         await query.answer("Publishing…")
         await query.edit_message_reply_markup(None)
-        sent, blocked, failed = await _broadcast(context, assessment_id)
-        report = f"📤 Assessment #{assessment_id} sent to {sent} user{'s' if sent != 1 else ''}."
-        if blocked:
-            report += f"\n{blocked} blocked the bot and were skipped."
-        if failed:
-            report += f"\n{failed} could not be reached (see the log)."
-        report += f"\nUse /results {assessment_id} to follow the scores."
-        await context.bot.send_message(chat_id, report)
-
-
-async def _broadcast(context: ContextTypes.DEFAULT_TYPE, assessment_id: int) -> tuple[int, int, int]:
-    db = services(context).db
-    blocks = student.assessment_blocks(db.get_assessment(assessment_id), db.get_questions(assessment_id))
-    sent = blocked = failed = 0
-    for user_id in db.active_user_ids():
-        try:
-            try:
-                await send_blocks(context.bot, user_id, blocks)
-            except RetryAfter as exc:
-                delay = exc.retry_after
-                await asyncio.sleep(delay.total_seconds() if hasattr(delay, "total_seconds") else delay)
-                await send_blocks(context.bot, user_id, blocks)
-            sent += 1
-        except Forbidden:
-            db.set_user_active(user_id, False)
-            blocked += 1
-        except TelegramError as exc:
-            log.warning("Could not send assessment %s to %s: %s", assessment_id, user_id, exc)
-            failed += 1
-        await asyncio.sleep(BROADCAST_DELAY)
-    return sent, blocked, failed
+        log.info("Assessment %s published; sending to %s users", assessment_id, queued)
+        # Sent from the queue: if the bot stops halfway, the next start sends the rest.
+        await work.deliver(context.bot, svc, assessment_id)
+        await work.report_deliveries(context.bot, svc, assessment_id)
 
 
 # ── commands ─────────────────────────────────────────────────────────────
@@ -310,12 +295,11 @@ async def close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     assessment = await _assessment_from_args(update, context, default_latest=False)
     if assessment is None:
         return
-    if assessment["status"] != "published":
+    if not services(context).db.close_assessment(assessment["id"]):
         await update.effective_message.reply_text(
             f"Assessment #{assessment['id']} is {assessment['status']}, not open."
         )
         return
-    services(context).db.set_status(assessment["id"], "closed")
     await update.effective_message.reply_text(
         f"🔒 Assessment #{assessment['id']} is closed. No more answers are accepted."
     )
@@ -329,23 +313,33 @@ async def regrade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if assessment is None:
         return
     message = update.effective_message
-    waiting = services(context).db.ungraded_submissions(assessment["id"])
+    svc = services(context)
+    waiting = svc.db.ungraded_submissions(assessment["id"])
     if not waiting:
         await message.reply_text("✅ All submissions for this assessment have already been graded.")
         return
-    await message.reply_text(f"⏳ Grading {len(waiting)} submission(s)…")
+    lease = work.grading_lease(svc)
+    # A submission that is being graded right now (just submitted, or picked up after a
+    # restart) is left to whoever is grading it.
+    claimed = [s for s in waiting if svc.db.claim_for_regrade(s["id"], lease)]
+    busy = len(waiting) - len(claimed)
+    busy_note = f" {busy} other(s) are being graded right now." if busy else ""
+    if not claimed:
+        await message.reply_text(f"⏳ All {busy} ungraded submission(s) are being graded right now.")
+        return
+    await message.reply_text(f"⏳ Grading {len(claimed)} submission(s)…{busy_note}")
     done = 0
-    for submission in waiting:
+    for index, submission in enumerate(claimed):
         try:
-            blocks = await student.grade_submission(context, submission["id"])
+            blocks = await work.grade(svc, submission["id"])
         except AIError as exc:
+            for rest in claimed[index + 1:]:  # release them for the next /regrade
+                svc.db.mark_submission_failed(rest["id"])
             await message.reply_text(f"❌ Stopped after {done}: {exc}")
             return
         done += 1
-        try:
-            await send_blocks(context.bot, submission["user_id"], blocks)
-        except TelegramError as exc:
-            log.warning("Could not send result to %s: %s", submission["user_id"], exc)
+        if blocks is not None:
+            await work.send_result(context.bot, svc, submission, blocks)
     await message.reply_text(f"✅ Graded {done} submission(s). The users have their results.")
 
 

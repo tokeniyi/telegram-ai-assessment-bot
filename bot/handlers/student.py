@@ -19,7 +19,7 @@ from telegram.ext import (
 
 from ..ai import AIError
 from ..utils import esc, num, percent, question_blocks, send_blocks, services, total_points
-from . import explain
+from . import explain, work
 from .reading import echo_block, is_image, read_upload
 
 log = logging.getLogger(__name__)
@@ -123,26 +123,7 @@ async def on_answer_upload(
 
 
 # ── submitting and grading ───────────────────────────────────────────────
-async def grade_submission(context: ContextTypes.DEFAULT_TYPE, submission_id: int) -> list[str]:
-    """Grade a stored submission, save the result and return the result message blocks.
-
-    Raises AIError if grading fails; the submission is then marked 'failed' and
-    stays in the database for /regrade.
-    """
-    svc = services(context)
-    submission = svc.db.get_submission(submission_id)
-    assessment = svc.db.get_assessment(submission["assessment_id"])
-    questions = svc.db.get_questions(assessment["id"])
-    try:
-        results, overall = await svc.ai.grade(questions, submission["raw_text"])
-    except AIError:
-        svc.db.mark_submission_failed(submission_id)
-        raise
-    score = round(sum(r["awarded"] for r in results), 2)
-    maximum = total_points(questions)
-    svc.db.save_grade(submission_id, score, maximum, overall, results)
-    return result_blocks(assessment, questions, results, score, maximum, overall,
-                         svc.settings.show_correct_answers)
+# Grading itself lives in work.py, which also finishes grading that a restart interrupted.
 
 
 def result_blocks(
@@ -200,7 +181,9 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if context.user_data.get("grading"):
         await query.answer("Your previous submission is still being graded.", show_alert=True)
         return
-    outcome, submission_id = svc.db.submit_draft(user.id, assessment_id, svc.settings.allow_resubmission)
+    outcome, submission_id = svc.db.submit_draft(
+        user.id, assessment_id, svc.settings.allow_resubmission, work.grading_lease(svc)
+    )
     if outcome == "empty":
         await query.answer("Nothing to submit — these answers were already submitted or discarded.",
                            show_alert=True)
@@ -217,25 +200,18 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.edit_message_text("✅ Your answers have been submitted! Grading is in progress…")
         await context.bot.send_chat_action(user.id, ChatAction.TYPING)
         try:
-            blocks = await grade_submission(context, submission_id)
+            blocks = await work.grade(svc, submission_id)
         except AIError as exc:
             log.error("Grading failed for submission %s: %s", submission_id, exc)
-            await context.bot.send_message(
-                user.id,
-                "✅ Your answers are saved, but grading is temporarily unavailable. "
-                "You don't need to submit again. Your result will be sent after the administrator retries grading.",
+            await context.bot.send_message(user.id, work.GRADING_DELAYED)
+            await work.notify_admins(
+                context.bot, svc,
+                f"⚠️ Grading failed for a submission to assessment #{assessment_id}: {exc}\n"
+                f"Run /regrade {assessment_id} to retry.",
             )
-            for admin_id in svc.settings.admin_ids:
-                try:
-                    await context.bot.send_message(
-                        admin_id,
-                        f"⚠️ Grading failed for a submission to assessment #{assessment_id}: {exc}\n"
-                        f"Run /regrade {assessment_id} to retry.",
-                    )
-                except Exception:  # an admin who never started the bot cannot be messaged
-                    log.debug("Could not notify admin %s", admin_id)
             return
-        await send_blocks(context.bot, user.id, blocks)
+        if blocks is not None:
+            await work.send_result(context.bot, svc, svc.db.get_submission(submission_id), blocks)
     finally:
         context.user_data["grading"] = False
 
@@ -298,9 +274,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def stored_result_blocks(context: ContextTypes.DEFAULT_TYPE, submission: dict[str, Any]) -> list[str]:
+def stored_result_blocks(svc, submission: dict[str, Any]) -> list[str]:
     """Rebuild the result message of an already graded submission."""
-    svc = services(context)
     assessment = svc.db.get_assessment(submission["assessment_id"])
     questions = svc.db.get_questions(assessment["id"])
     return result_blocks(

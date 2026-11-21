@@ -131,7 +131,7 @@ most one submission: the others find the draft already gone and get "already sub
 **What is deliberately still in memory.** The `grading`, `reading` and `explaining` flags only stop
 one process from starting the same slow job twice for a user; they are not correctness guards, so
 losing them on restart is harmless. A grading interrupted by a restart leaves its submission
-`pending`; `/regrade` retries it. Durable jobs with retries are planned for a later PR.
+`pending`; `/regrade` retries it. (Stage 3 below resumes it automatically.)
 
 **One behaviour change.** Tapping an assessment in `/pending` that you already have answers saved
 for keeps them and shows the buttons again (before, it wiped them). Picking a *different*
@@ -166,6 +166,28 @@ in this process or another one.
 The table is created on start (`CREATE TABLE IF NOT EXISTS`); existing data is not touched.
 New files: `bot/handlers/dedupe.py`, `tests/test_updates.py`. The test harness now shares one update
 counter between harnesses that stand for a restarted bot, as Telegram does.
+
+### Stage 3: sending and grading survive a restart
+
+Sending and grading used to run only inside the handler that started them, so a restart in the
+middle lost the rest. Both now run from rows in PostgreSQL that any bot process can finish.
+
+- **Send queue.** "Send to all users" publishes the draft and writes one `deliveries` row per user
+  in a single transaction (`UPDATE … WHERE status = 'draft' RETURNING`), so two quick taps, or two
+  bot versions, publish it once. Each row is claimed with a 5-minute lease, sent, and marked
+  `sent`, `blocked` or (after 3 tries) `failed`. The publisher gets the "sent to N users" report
+  once, from whichever process finishes.
+- **Grading.** A new submission is leased to the process grading it. If that process stops, the
+  lease runs out and another process grades it, at most 3 times; then it is `failed` and the admins
+  are told to `/regrade`. A result that was graded but not delivered is sent once more after 5
+  minutes.
+- **On start and every 30 seconds** the bot finishes leftover sending and grading.
+- **Also closed:** Discard or Regenerate racing with Send, `/close` during sending (the rest is
+  not sent), and `/regrade` on a submission being graded right now.
+- **Upgrade.** New columns and the `deliveries` table are added on start. Work done by the previous
+  version is not redone: old results are not resent, old assessments are not re-reported.
+
+Details, decisions and tests: [docs/implementations/phase-03](implementations/phase-03/summary.md).
 
 ## 3. Things to know
 

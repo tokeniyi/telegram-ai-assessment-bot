@@ -94,6 +94,10 @@ class FakeVisionProvider(FakeProvider):
         return self.vision_replies.pop(0)
 
 
+class Crash(BaseException):
+    """Stands for the bot process dying mid-work: not an Exception, so no handler catches it."""
+
+
 class FakeTelegram(BaseRequest):
     """Records every Bot API call and answers with a minimal valid response."""
 
@@ -101,6 +105,9 @@ class FakeTelegram(BaseRequest):
         self.calls = []
         self.files = {}
         self._message_id = 5000
+        # fail(method, params) -> None to answer normally, or (http_status, description) for a
+        # Bot API error; it may also raise, e.g. Crash to stand for the process dying.
+        self.fail = None
 
     @property
     def read_timeout(self):
@@ -117,6 +124,12 @@ class FakeTelegram(BaseRequest):
             return 200, self.files[url.rsplit("/", 1)[1]]
         api_method = url.rsplit("/", 1)[1]
         params = dict(request_data.parameters) if request_data else {}
+        if self.fail:
+            error = self.fail(api_method, params)
+            if error:
+                status, description = error
+                return status, json.dumps({"ok": False, "error_code": status,
+                                           "description": description}).encode()
         self.calls.append((api_method, params))
         if api_method == "getMe":
             result = {"id": 1, "is_bot": True, "first_name": "Bot", "username": "test_bot"}

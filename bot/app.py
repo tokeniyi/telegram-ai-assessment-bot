@@ -12,6 +12,7 @@ from .ai import AssessmentAI, build_provider
 from .config import Settings
 from .db import Database
 from .handlers import register_handlers
+from .handlers import work
 from .handlers.dedupe import prune as prune_update_records
 from .ocr import OCRService
 from .utils import Services
@@ -52,11 +53,17 @@ async def _post_init(application: Application) -> None:
              me.username, services.settings.ai_provider, services.settings.ai_model,
              sorted(services.settings.admin_ids) or "none")
     prune_update_records(services.db)
+    # Finish sending and grading that a restart interrupted, then keep checking for leftovers.
+    work.start(application)
     log.info(services.ocr.describe())
     services.ocr.warm_up()
     if not services.settings.admin_ids:
         log.warning("ADMIN_IDS is empty: nobody can upload material. Send /myid to the bot, "
                     "put the number in ADMIN_IDS in .env and restart.")
+
+
+async def _post_stop(application: Application) -> None:
+    await work.stop(application)
 
 
 async def _post_shutdown(application: Application) -> None:
@@ -81,6 +88,7 @@ def build_application(settings: Settings, builder: ApplicationBuilder | None = N
         builder.token(settings.telegram_bot_token)
         .concurrent_updates(True)  # an AI call for one user must not block everyone else
         .post_init(_post_init)
+        .post_stop(_post_stop)
         .post_shutdown(_post_shutdown)
         .build()
     )
