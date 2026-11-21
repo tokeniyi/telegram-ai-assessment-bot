@@ -10,6 +10,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .logs import LOG_FORMATS
 from .ocr.types import KNOWN_ENGINES, MODES, OCRConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -69,6 +70,7 @@ class Settings:
     webhook_secret: str = ""
     shutdown_grace_seconds: int = 50
     telegram_api_url: str | None = None  # a local Bot API server; None is api.telegram.org
+    log_format: str = "text"           # text | json (Stage 5)
 
     def is_admin(self, user_id: int | None) -> bool:
         return user_id is not None and user_id in self.admin_ids
@@ -197,6 +199,10 @@ def load_settings(env_file: Path | None = None) -> Settings:
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", webhook_secret or "x"):
         problems.append("WEBHOOK_SECRET may only contain A-Z, a-z, 0-9, _ and - (at most 256)")
 
+    log_format = _get("LOG_FORMAT", "text").lower()
+    if log_format not in LOG_FORMATS:
+        problems.append(f"LOG_FORMAT must be one of {', '.join(LOG_FORMATS)}, got {log_format!r}")
+
     if problems:
         raise ConfigError(
             "Configuration problem(s) in .env:\n  - " + "\n  - ".join(problems)
@@ -229,4 +235,5 @@ def load_settings(env_file: Path | None = None) -> Settings:
         webhook_secret=webhook_secret,
         shutdown_grace_seconds=_int("SHUTDOWN_GRACE_SECONDS", 50, minimum=0),
         telegram_api_url=_get("TELEGRAM_API_URL").rstrip("/") or None,
+        log_format=log_format,
     )

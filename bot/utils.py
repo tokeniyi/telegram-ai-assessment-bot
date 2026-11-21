@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,6 +31,7 @@ class Services:
     # Set when the bot starts shutting down: slow work finishes the item in hand and takes no
     # new one, so nothing is cut off halfway (the next process picks up what is left).
     stopping: asyncio.Event = field(default_factory=asyncio.Event)
+    started_at: float = field(default_factory=time.monotonic)  # for /status
 
 
 def services(context: ContextTypes.DEFAULT_TYPE) -> Services:

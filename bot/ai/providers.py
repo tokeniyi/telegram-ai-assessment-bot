@@ -20,6 +20,15 @@ class AIError(Exception):
     """An AI request failed. The message is safe to show to an admin."""
 
 
+class AIUnavailable(AIError):
+    """The provider could not be used at all: not reachable, an error status, rate limited, or the
+    key or model refused. (A reply that arrived but was unusable is a plain AIError.) Several in a
+    row mean the provider is down, and the admins are told (bot/alerts.py)."""
+
+
+CHECK_TIMEOUT = 10  # seconds for the /status check of the provider
+
+
 class AIProvider(Protocol):
     name: str
     model: str
@@ -60,6 +69,21 @@ class AnthropicProvider:
         ]
         return await self._run(system, [*content, {"type": "text", "text": user}], model or self.model)
 
+    async def check(self) -> str:
+        """Whether the provider answers and accepts the key, without using tokens (/status)."""
+        sdk = self._sdk
+        try:
+            await self._client.with_options(timeout=CHECK_TIMEOUT, max_retries=0).models.list(limit=1)
+        except sdk.NotFoundError:
+            return "reachable (it has no model list)"
+        except sdk.AuthenticationError as exc:
+            raise AIUnavailable("The AI provider rejected the API key. Check AI_API_KEY in .env.") from exc
+        except sdk.APIStatusError as exc:
+            raise AIUnavailable(f"The AI provider returned an error ({exc.status_code}): {exc.message}") from exc
+        except sdk.APIConnectionError as exc:
+            raise AIUnavailable("Could not reach the AI provider. Check the network connection.") from exc
+        return "reachable"
+
     async def _run(self, system: str, content, model: str) -> str:
         sdk = self._sdk
         request = dict(
@@ -79,17 +103,17 @@ class AnthropicProvider:
             async with stream_cm as stream:
                 message = await stream.get_final_message()
         except sdk.AuthenticationError as exc:
-            raise AIError("The AI provider rejected the API key. Check AI_API_KEY in .env.") from exc
+            raise AIUnavailable("The AI provider rejected the API key. Check AI_API_KEY in .env.") from exc
         except sdk.PermissionDeniedError as exc:
-            raise AIError(f"The API key is not allowed to use model {model}.") from exc
+            raise AIUnavailable(f"The API key is not allowed to use model {model}.") from exc
         except sdk.NotFoundError as exc:
-            raise AIError(f"Model {model!r} was not found. Check AI_MODEL in .env.") from exc
+            raise AIUnavailable(f"Model {model!r} was not found. Check AI_MODEL in .env.") from exc
         except sdk.RateLimitError as exc:
-            raise AIError("The AI provider is rate limiting requests. Try again in a minute.") from exc
+            raise AIUnavailable("The AI provider is rate limiting requests. Try again in a minute.") from exc
         except sdk.APIStatusError as exc:
-            raise AIError(f"The AI provider returned an error ({exc.status_code}): {exc.message}") from exc
+            raise AIUnavailable(f"The AI provider returned an error ({exc.status_code}): {exc.message}") from exc
         except sdk.APIConnectionError as exc:
-            raise AIError("Could not reach the AI provider. Check the network connection.") from exc
+            raise AIUnavailable("Could not reach the AI provider. Check the network connection.") from exc
 
         if message.stop_reason == "refusal":
             raise AIError("The AI model declined to process this content.")
@@ -122,6 +146,21 @@ class OpenAICompatibleProvider:
         # switch JSON mode off for the question and grading requests that share this client.
         return await self._run(system, content, model or self.model, json_mode=False)
 
+    async def check(self) -> str:
+        """Whether the provider answers and accepts the key, without using tokens (/status)."""
+        sdk = self._sdk
+        try:
+            await self._client.with_options(timeout=CHECK_TIMEOUT, max_retries=0).models.list()
+        except sdk.NotFoundError:  # some OpenAI-compatible servers have no /models
+            return "reachable (it has no model list)"
+        except sdk.AuthenticationError as exc:
+            raise AIUnavailable("The AI provider rejected the API key. Check AI_API_KEY in .env.") from exc
+        except sdk.APIStatusError as exc:
+            raise AIUnavailable(f"The AI provider returned an error ({exc.status_code}): {exc.message}") from exc
+        except sdk.APIConnectionError as exc:
+            raise AIUnavailable("Could not reach the AI provider. Check AI_BASE_URL and the network.") from exc
+        return "reachable"
+
     async def _run(self, system: str, content, model: str, json_mode: bool | None = None) -> str:
         sdk = self._sdk
         messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
@@ -137,17 +176,17 @@ class OpenAICompatibleProvider:
                 response = await self._create(messages, model, json_mode=False)
                 self._json_mode = False
         except sdk.AuthenticationError as exc:
-            raise AIError("The AI provider rejected the API key. Check AI_API_KEY in .env.") from exc
+            raise AIUnavailable("The AI provider rejected the API key. Check AI_API_KEY in .env.") from exc
         except sdk.PermissionDeniedError as exc:
-            raise AIError(f"The API key is not allowed to use model {model}.") from exc
+            raise AIUnavailable(f"The API key is not allowed to use model {model}.") from exc
         except sdk.NotFoundError as exc:
-            raise AIError(f"Model {model!r} was not found. Check AI_MODEL / AI_BASE_URL in .env.") from exc
+            raise AIUnavailable(f"Model {model!r} was not found. Check AI_MODEL / AI_BASE_URL in .env.") from exc
         except sdk.RateLimitError as exc:
-            raise AIError("The AI provider is rate limiting requests or the quota is used up.") from exc
+            raise AIUnavailable("The AI provider is rate limiting requests or the quota is used up.") from exc
         except sdk.APIStatusError as exc:
-            raise AIError(f"The AI provider returned an error ({exc.status_code}): {exc.message}") from exc
+            raise AIUnavailable(f"The AI provider returned an error ({exc.status_code}): {exc.message}") from exc
         except sdk.APIConnectionError as exc:
-            raise AIError("Could not reach the AI provider. Check AI_BASE_URL and the network.") from exc
+            raise AIUnavailable("Could not reach the AI provider. Check AI_BASE_URL and the network.") from exc
 
         if not response.choices:
             raise AIError("The AI provider returned an empty response.")

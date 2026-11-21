@@ -103,6 +103,28 @@ ALTER TABLE submissions ADD COLUMN IF NOT EXISTS result_sent_at TIMESTAMPTZ;
 -- Set by this version when it saves a grade, cleared once the result is sent. An older version
 -- running during a deploy never sets it, so a result it sent itself is never sent again.
 ALTER TABLE submissions ADD COLUMN IF NOT EXISTS result_due BOOLEAN NOT NULL DEFAULT FALSE;
+-- Stage 5: why and when grading failed, and whether the admins still have to be told about it.
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS grading_error TEXT;
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS failed_at TIMESTAMPTZ;
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS failure_notice_due BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS idx_submissions_failed ON submissions(assessment_id) WHERE status = 'failed';
+-- Stage 5: how the AI provider's recent requests went, shared by every bot process (one row).
+-- Locking it decides, across processes, who tells the admins that the provider is down or back.
+CREATE TABLE IF NOT EXISTS ai_health (
+    id                    INTEGER PRIMARY KEY CHECK (id = 1),
+    consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+    failing_since         TIMESTAMPTZ,
+    last_failure_at       TIMESTAMPTZ,
+    last_error            TEXT,
+    last_success_at       TIMESTAMPTZ,
+    down_notified_at      TIMESTAMPTZ      -- the admins were told it is down; cleared once told it is back
+);
+INSERT INTO ai_health (id) VALUES (1) ON CONFLICT DO NOTHING;
+-- Stage 5: when the admins were last sent a notice of each kind (to batch repeated ones).
+CREATE TABLE IF NOT EXISTS admin_notices (
+    kind         TEXT PRIMARY KEY,
+    notified_at  TIMESTAMPTZ NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_submissions_pending ON submissions(id) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_questions_assessment ON questions(assessment_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_lookup ON submissions(assessment_id, user_id);
@@ -421,7 +443,8 @@ class Database:
         (by another process that picked it up too), so only one result is ever sent."""
         return self._one(
             """UPDATE submissions SET status = 'graded', score = %s, max_score = %s, feedback = %s,
-                      details = %s, graded_at = %s, grading_claimed_until = NULL, result_due = TRUE
+                      details = %s, graded_at = %s, grading_claimed_until = NULL, result_due = TRUE,
+                      grading_error = NULL
                WHERE id = %s AND status != 'graded' RETURNING id""",
             (score, max_score, feedback, json.dumps(details), _now(), submission_id),
         ) is not None
@@ -430,11 +453,13 @@ class Database:
         """For an assessment published to nobody: its (empty) report has been sent."""
         self._run("UPDATE assessments SET delivery_reported_at = now() WHERE id = %s", (assessment_id,))
 
-    def mark_submission_failed(self, submission_id: int) -> None:
+    def mark_submission_failed(self, submission_id: int, error: str | None = None) -> None:
+        """Grading failed; the submission waits for /regrade and the admins are to be told."""
         self._run(
-            "UPDATE submissions SET status = 'failed', grading_claimed_until = NULL "
+            "UPDATE submissions SET status = 'failed', grading_claimed_until = NULL, grading_error = %s, "
+            "failed_at = now(), failure_notice_due = TRUE "
             "WHERE id = %s AND status != 'graded'",
-            (submission_id,),
+            (error, submission_id),
         )
 
     # ── grading that survives a restart ──────────────────────────────────
@@ -460,8 +485,9 @@ class Database:
             if row is None:
                 return None
             if row["grading_attempts"] >= max_attempts:
-                conn.execute("UPDATE submissions SET status = 'failed', grading_claimed_until = NULL "
-                             "WHERE id = %s", (row["id"],))
+                conn.execute("UPDATE submissions SET status = 'failed', grading_claimed_until = NULL, "
+                             "grading_error = %s, failed_at = now(), failure_notice_due = TRUE WHERE id = %s",
+                             (f"grading was interrupted {row['grading_attempts']} times", row["id"]))
                 return "gave_up", row
             row = conn.execute(
                 """UPDATE submissions SET grading_attempts = grading_attempts + 1,
@@ -532,6 +558,103 @@ class Database:
                WHERE s.user_id = %s ORDER BY s.id DESC LIMIT %s""",
             (user_id, limit),
         )
+
+    # ── admin visibility (Stage 5) ───────────────────────────────────────
+    def record_ai_success(self) -> dict[str, Any] | None:
+        """A request reached the AI provider. Returns the outage that just ended (its
+        `failing_since`) if the admins had been told it was down, so that exactly one caller,
+        across all processes, tells them it is back."""
+        with self._pool.connection() as conn:
+            before = conn.execute("SELECT * FROM ai_health WHERE id = 1 FOR UPDATE").fetchone()
+            conn.execute(
+                """UPDATE ai_health SET consecutive_failures = 0, failing_since = NULL,
+                          last_success_at = now(), down_notified_at = NULL WHERE id = 1"""
+            )
+            return before if before and before["down_notified_at"] is not None else None
+
+    def record_ai_failure(self, error: str, alert_after: int) -> dict[str, Any] | None:
+        """A request could not be made at all. Returns the health row when this failure makes
+        `alert_after` in a row and the admins have not been told yet (to exactly one caller)."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """UPDATE ai_health SET consecutive_failures = consecutive_failures + 1,
+                          failing_since = COALESCE(failing_since, now()), last_failure_at = now(),
+                          last_error = %s
+                   WHERE id = 1 RETURNING *""",
+                (error,),
+            ).fetchone()
+            if row["consecutive_failures"] < alert_after or row["down_notified_at"] is not None:
+                return None
+            return conn.execute("UPDATE ai_health SET down_notified_at = now() WHERE id = 1 RETURNING *").fetchone()
+
+    def ai_health(self) -> dict[str, Any]:
+        return self._one("SELECT * FROM ai_health WHERE id = 1")
+
+    def claim_grading_failure_notice(self, min_interval: float, force: bool = False) -> list[dict[str, Any]]:
+        """Grading failures the admins have not been told about, each returned once, to one caller.
+
+        Returns nothing while the last notice is less than `min_interval` seconds old, or while the
+        admins know the AI provider is down (its recovery message reports them), unless `force`.
+        """
+        with self._pool.connection() as conn:
+            conn.execute("""INSERT INTO admin_notices (kind, notified_at) VALUES ('grading_failed', '-infinity')
+                            ON CONFLICT DO NOTHING""")
+            last = conn.execute("""SELECT notified_at > now() - make_interval(secs => %s) AS recent
+                                   FROM admin_notices WHERE kind = 'grading_failed' FOR UPDATE""",
+                                (min_interval,)).fetchone()
+            if not force:
+                down = conn.execute("SELECT down_notified_at IS NOT NULL AS down FROM ai_health WHERE id = 1").fetchone()
+                if last["recent"] or (down and down["down"]):
+                    return []
+            # A failure fixed by /regrade before the notice is no longer 'failed', so it is not reported.
+            rows = conn.execute(
+                """UPDATE submissions SET failure_notice_due = FALSE
+                   WHERE failure_notice_due AND status = 'failed'
+                   RETURNING id, assessment_id, grading_error, failed_at"""
+            ).fetchall()
+            if rows:
+                conn.execute("UPDATE admin_notices SET notified_at = now() WHERE kind = 'grading_failed'")
+            return sorted(rows, key=lambda r: r["id"])
+
+    def failed_grading_by_assessment(self) -> list[dict[str, Any]]:
+        """Submissions waiting for /regrade, per assessment, newest assessment first."""
+        return self._all(
+            """SELECT assessment_id, COUNT(*) AS n FROM submissions WHERE status = 'failed'
+               GROUP BY assessment_id ORDER BY assessment_id DESC"""
+        )
+
+    def status_overview(self, grading_lease: float) -> dict[str, Any]:
+        """Everything /status shows, read from the shared tables (so it covers every process)."""
+        grading = self._one(
+            f"""SELECT COUNT(*) FILTER (WHERE status = 'pending' AND NOT {self._STALE}) AS grading_now,
+                       COUNT(*) FILTER (WHERE status = 'pending' AND {self._STALE}) AS interrupted,
+                       COUNT(*) FILTER (WHERE status = 'graded' AND result_due) AS results_unsent
+                FROM submissions WHERE status IN ('pending', 'graded')""",
+            (grading_lease, grading_lease),
+        )
+        latest_error = self._one(
+            """SELECT grading_error FROM submissions WHERE status = 'failed' AND grading_error IS NOT NULL
+               ORDER BY failed_at DESC NULLS LAST, id DESC LIMIT 1"""
+        )
+        deliveries = self._all(
+            """SELECT assessment_id, status, COUNT(*) AS n FROM deliveries
+               WHERE status IN ('pending', 'failed') GROUP BY assessment_id, status
+               ORDER BY assessment_id DESC"""
+        )
+        delivery_error = self._one(
+            """SELECT last_error FROM deliveries WHERE status = 'failed' AND last_error IS NOT NULL
+               ORDER BY assessment_id DESC, user_id DESC LIMIT 1"""
+        )
+        blocked = self._one("SELECT COUNT(*) AS n FROM users WHERE NOT is_active")["n"]
+        return {
+            **grading,
+            "failed_grading": self.failed_grading_by_assessment(),
+            "grading_error": latest_error["grading_error"] if latest_error else None,
+            "deliveries": deliveries,
+            "delivery_error": delivery_error["last_error"] if delivery_error else None,
+            "blocked_users": blocked,
+            "ai": self.ai_health(),
+        }
 
     # ── unfinished work: sessions and drafts ─────────────────────────────
     # Every method below that changes a user's draft runs in one transaction that first locks

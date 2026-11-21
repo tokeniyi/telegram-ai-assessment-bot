@@ -1,6 +1,6 @@
 # Roadmap
 
-The planned order of work on the bot. Stages 1 to 3 are done and Stage 4 is in review. The stages
+The planned order of work on the bot. Stages 1 to 4 are done and Stage 5 is in review. The stages
 after it are proposals and can be reordered. What was built in each stage, and how it was tested,
 is in [docs/implementations](docs/implementations/README.md).
 
@@ -12,8 +12,8 @@ Stages 5 to 7 are independent of each other.
 | 1 | Saved answers survive restarts | ✅ Done ([#8](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/8)) |
 | 2 | Each Telegram update handled once | ✅ Done ([#10](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/10)) |
 | 3 | Work that survives a restart | ✅ Done ([#12](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/12)) |
-| 4 | Safer deploys | 🔍 In review ([phase 04 docs](docs/implementations/phase-04/summary.md)) |
-| 5 | Visibility for the admin | Proposed |
+| 4 | Safer deploys | ✅ Done ([#13](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/13)) |
+| 5 | Visibility for the admin | 🔍 In review ([phase 05 docs](docs/implementations/phase-05/summary.md)) |
 | 6 | Assessment features | Proposed |
 | 7 | Scale and limits | Proposed |
 
@@ -53,35 +53,36 @@ left, with retry limits. Details: [phase 03](docs/implementations/phase-03/summa
 Left for later: a process killed between Telegram accepting a message and the row being marked
 sent sends it again after the lease (see Stage 4).
 
+### Stage 4: Safer deploys ([#13](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/13))
+
+`GET /health` on `PORT` answers 200 only while updates are fetched and the database answers, so
+Railway switches over once the new version is ready. On SIGTERM the bot stops fetching, confirms
+fetched updates to Telegram, finishes the updates and the background item in hand within
+`SHUTDOWN_GRACE_SECONDS`, then exits. An optional webhook (`WEBHOOK_URL`) removes double polling.
+Details: [phase 04](docs/implementations/phase-04/summary.md).
+
+Left for later: the Railway settings (healthcheck path, draining time) are made in the dashboard,
+and no real redeploy was verified from the development environment.
+
 ---
 
 ## Next
 
-### Stage 4: Safer deploys
+### Stage 5: Visibility for the admin
 
-Most duplicates come from the window when two bot versions run at once during a Railway deploy.
-This stage makes that window short or removes it.
+Problems used to show up only in the server logs, or when a student complained.
 
-- **Health check.** Railway switches over only once the new version is ready.
-- **Clean shutdown.** On stop, the bot stops taking new updates and finishes the work in progress.
-- **Optional: webhook instead of polling.** Telegram then sends each update to one address, so two
-  versions never fetch the same updates.
+- `/status` for admins: grading waiting, interrupted and failed, results not delivered,
+  assessment messages queued or failed, and a live check of the AI provider (no tokens used).
+- Alerts to the admins when the AI provider fails 3 requests in a row and when it is back;
+  grading failures reported at once, then batched.
+- Structured log events for sending, grading, OCR and AI requests; `LOG_FORMAT=json` for Railway.
 
-Done when: a redeploy during normal use produces no `already handled` log lines and no
-interrupted work.
+Details: [phase 05](docs/implementations/phase-05/summary.md).
 
 ---
 
 ## Proposed
-
-### Stage 5: Visibility for the admin
-
-Problems currently show up only in the server logs, or when a student complains.
-
-- An admin command (for example `/status`) showing grading still waiting, failed grading, failed
-  sends and whether the AI provider is reachable.
-- An alert to the admins when grading keeps failing or the AI provider is down.
-- Clearer, structured logs for sending, grading and OCR.
 
 ### Stage 6: Assessment features
 

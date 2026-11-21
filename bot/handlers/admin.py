@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
 import logging
+import time
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
@@ -16,6 +18,7 @@ from telegram.ext import (
 )
 
 from ..ai import AIError
+from ..alerts import clock, regrade_hint
 from ..extract import SUPPORTED_DESCRIPTION
 from ..utils import (
     display_name, esc, num, percent, question_blocks, send_blocks, services, total_points,
@@ -356,6 +359,100 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+# ── /status ──────────────────────────────────────────────────────────────
+STATUS_CHECK_TIMEOUT = 12  # seconds /status waits for the AI provider
+
+
+async def _check_ai(svc) -> str:
+    """Ask the provider whether it answers, without spending tokens (AIProvider.check)."""
+    check = getattr(svc.ai.provider, "check", None)
+    if check is None:
+        return "➖ not checked (this provider has no check)"
+    started = time.monotonic()
+    try:
+        note = await asyncio.wait_for(check(), STATUS_CHECK_TIMEOUT)
+    except asyncio.TimeoutError:
+        return f"❌ no answer within {STATUS_CHECK_TIMEOUT} s"
+    except AIError as exc:
+        return f"❌ {esc(exc)}"
+    except Exception as exc:  # the check must not break /status
+        log.warning("AI provider check failed unexpectedly: %r", exc)
+        return f"❌ check failed: {esc(exc)}"
+    return f"✅ {esc(note)} ({time.monotonic() - started:.1f} s)"
+
+
+def _ai_history(ai: dict[str, Any]) -> list[str]:
+    if ai["consecutive_failures"]:
+        lines = [f"Recent requests: ❌ {ai['consecutive_failures']} in a row failed since "
+                 f"{clock(ai['failing_since'])}: {esc(ai['last_error'])}"]
+        if ai["last_success_at"]:
+            lines.append(f"Last success: {clock(ai['last_success_at'])}")
+        if ai["down_notified_at"]:
+            lines.append(f"🚨 Admins alerted at {clock(ai['down_notified_at'])}")
+        return lines
+    if ai["last_success_at"]:
+        return [f"Recent requests: ✅ the last one got an answer at {clock(ai['last_success_at'])}"]
+    return ["Recent requests: none recorded yet"]
+
+
+def _per_assessment(rows: list[dict[str, Any]], status: str) -> tuple[int, str]:
+    rows = [r for r in rows if r["status"] == status]
+    shown = ", ".join(f"#{r['assessment_id']}: {r['n']}" for r in rows[:5])
+    return sum(r["n"] for r in rows), shown + (", …" if len(rows) > 5 else "")
+
+
+def _uptime(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes} min" if hours < 48 else f"{hours // 24} days"
+
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """What needs the admin's attention: grading, sending, and the AI provider."""
+    if not await _require_admin(update, context):
+        return
+    svc = services(context)
+    message = await update.effective_message.reply_text("🩺 Checking…")
+    overview, ai_now = svc.db.status_overview(work.grading_lease(svc)), await _check_ai(svc)
+
+    lines = ["🩺 <b>Bot status</b>", "",
+             f"<b>AI provider</b> · {esc(svc.settings.ai_provider)} / {esc(svc.ai.provider.model)}",
+             f"Now: {ai_now}", *_ai_history(overview["ai"]), "", "<b>Grading</b>"]
+    grading = []
+    if overview["grading_now"]:
+        grading.append(f"⏳ {overview['grading_now']} being graded now")
+    if overview["interrupted"]:
+        grading.append(f"🔁 {overview['interrupted']} interrupted; graded again automatically")
+    failed = overview["failed_grading"]
+    if failed:
+        grading.append(f"❌ {sum(r['n'] for r in failed)} failed. {regrade_hint(failed[:5])}")
+        if overview["grading_error"]:
+            grading.append(f"   Latest error: {esc(overview['grading_error'])}")
+    if overview["results_unsent"]:
+        grading.append(f"📨 {overview['results_unsent']} result(s) not delivered yet; sent again automatically")
+    lines += grading or ["✅ Nothing waiting"]
+
+    lines += ["", "<b>Sending assessments</b>"]
+    sending = []
+    queued, where = _per_assessment(overview["deliveries"], "pending")
+    if queued:
+        sending.append(f"⏳ {queued} message(s) still to send ({where})")
+    failed_sends, where = _per_assessment(overview["deliveries"], "failed")
+    if failed_sends:
+        sending.append(f"❌ {failed_sends} could not be sent ({where})")
+        if overview["delivery_error"]:
+            sending.append(f"   Latest error: {esc(overview['delivery_error'])}")
+    if overview["blocked_users"]:
+        sending.append(f"🚫 {overview['blocked_users']} user(s) have blocked the bot")
+    lines += sending or ["✅ Nothing queued or failed"]
+
+    mode = "webhook" if svc.settings.webhook_url else "polling"
+    lines += ["", f"<i>Answered by a process running for {_uptime(time.monotonic() - svc.started_at)} ({mode}).</i>"]
+    await message.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
 def register(application: Application) -> None:
     application.add_handler(CommandHandler("generate", generate, filters=PRIVATE))
     application.add_handler(CommandHandler("assessments", assessments, filters=PRIVATE))
@@ -363,4 +460,5 @@ def register(application: Application) -> None:
     application.add_handler(CommandHandler("close", close, filters=PRIVATE))
     application.add_handler(CommandHandler("regrade", regrade, filters=PRIVATE))
     application.add_handler(CommandHandler("users", users, filters=PRIVATE))
+    application.add_handler(CommandHandler("status", status, filters=PRIVATE))
     application.add_handler(CallbackQueryHandler(on_draft_button, pattern=r"^(pub|regen|del):\d+$"))

@@ -5,7 +5,7 @@
 | Roadmap stage | Stage 4 in [ROADMAP.md](../../../ROADMAP.md) |
 | Branch | `claude/lucid-brahmagupta-dri4yd` |
 | Pull request | [#13](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/13) |
-| Status | In review |
+| Status | Merged |
 
 ## Accomplished
 
@@ -47,7 +47,7 @@
 
 ## Final status
 
-Implemented and tested; PR #13 open for review.
+Implemented and tested; PR #13 merged on 2026-11-21. CI on its last commit: `test` and GitGuardian passed.
 
 ## Pull request
 

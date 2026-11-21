@@ -1,12 +1,12 @@
 """Entry point:  python main.py"""
 
-import logging
 import signal
 import sys
 
 from bot.app import build_application
 from bot.runtime import run
 from bot.config import ConfigError, load_settings
+from bot.logs import setup_logging
 
 
 def main() -> None:
@@ -18,13 +18,7 @@ def main() -> None:
     except ConfigError as exc:
         sys.exit(str(exc))
 
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level, logging.INFO),
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    )
-    # httpx logs every request URL at INFO, and Telegram URLs contain the bot token.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpx2").setLevel(logging.WARNING)
+    setup_logging(settings.log_level, settings.log_format)  # text or JSON lines, on stdout
 
     # Polls Telegram, or receives a webhook if WEBHOOK_URL is set; serves /health on PORT.
     # Stops cleanly on SIGTERM (see bot/runtime.py).

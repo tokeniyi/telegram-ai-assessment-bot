@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from telegram import Bot
@@ -32,6 +33,8 @@ from telegram.error import Forbidden, RetryAfter, TelegramError, TimedOut
 from telegram.ext import Application
 
 from ..ai import AIError
+from ..alerts import report_grading_failures
+from ..logs import event
 from ..utils import Services, pack_blocks, send_blocks, total_points
 from . import student
 
@@ -94,21 +97,26 @@ async def deliver(bot: Bot, svc: Services, assessment_id: int | None = None) -> 
         aid, user_id = row["assessment_id"], row["user_id"]
         if aid not in blocks_cache:
             blocks_cache[aid] = student.assessment_blocks(db.get_assessment(aid), db.get_questions(aid))
+        fields = dict(assessment=aid, user=user_id, attempt=row["attempts"])
         try:
             await _send_once(bot, user_id, blocks_cache[aid])
         except Forbidden:
             db.set_user_active(user_id, False)
             db.finish_delivery(aid, user_id, "blocked")
+            event(log, "delivery.blocked", **fields)
         except (TimedOut, PartlySent) as exc:
             # Telegram may have delivered it (or part of it): sending again could repeat it.
             db.finish_delivery(aid, user_id, "failed", str(exc))
-            log.warning("Sending assessment %s to %s may not have completed; not retrying: %s", aid, user_id, exc)
+            event(log, "delivery.failed", logging.WARNING, **fields, retry=False,
+                  reason="may have arrived; not repeated", error=str(exc))
         except TelegramError as exc:
             status = db.retry_delivery_later(aid, user_id, DELIVERY_RETRY_DELAY, MAX_DELIVERY_ATTEMPTS, str(exc))
-            log.warning("Could not send assessment %s to %s (%s): %s", aid, user_id,
-                        {"failed": "giving up", "pending": "will retry"}.get(status, "assessment closed"), exc)
+            event(log, "delivery.failed", logging.WARNING, **fields, retry=status == "pending",
+                  reason={"failed": "giving up", "pending": "will retry"}.get(status, "assessment closed"),
+                  error=str(exc))
         else:
             db.finish_delivery(aid, user_id, "sent")
+            event(log, "delivery.sent", logging.DEBUG, **fields)
         await asyncio.sleep(SEND_DELAY)
     return attempted
 
@@ -129,6 +137,10 @@ async def report_deliveries(bot: Bot, svc: Services, assessment_id: int | None =
     """Tell each publisher, once, that their assessment has finished sending."""
     for row in svc.db.claim_delivery_reports(assessment_id):
         admin_id = row["published_by"] or row["created_by"]
+        counts = row["counts"]
+        event(log, "delivery.finished", assessment=row["id"], sent=counts.get("sent", 0),
+              blocked=counts.get("blocked", 0), failed=counts.get("failed", 0),
+              cancelled=counts.get("cancelled", 0))
         try:
             await bot.send_message(admin_id, delivery_report(row["id"], row["counts"]))
         except TelegramError as exc:
@@ -145,16 +157,22 @@ async def grade(svc: Services, submission_id: int) -> list[str] | None:
     submission = svc.db.get_submission(submission_id)
     assessment = svc.db.get_assessment(submission["assessment_id"])
     questions = svc.db.get_questions(assessment["id"])
+    fields = dict(submission=submission_id, assessment=assessment["id"], user=submission["user_id"],
+                  attempt=submission["grading_attempts"])
+    event(log, "grading.started", **fields)
+    started = time.monotonic()
     try:
         results, overall = await svc.ai.grade(questions, submission["raw_text"])
-    except AIError:
-        svc.db.mark_submission_failed(submission_id)
+    except AIError as exc:
+        svc.db.mark_submission_failed(submission_id, str(exc))
+        event(log, "grading.failed", logging.ERROR, **fields, seconds=time.monotonic() - started, error=str(exc))
         raise
     score = round(sum(r["awarded"] for r in results), 2)
     maximum = total_points(questions)
     if not svc.db.save_grade(submission_id, score, maximum, overall, results):
-        log.info("Submission %s was graded by another process meanwhile", submission_id)
+        event(log, "grading.superseded", **fields, reason="graded by another process meanwhile")
         return None
+    event(log, "grading.finished", **fields, score=score, max=maximum, seconds=time.monotonic() - started)
     return student.result_blocks(assessment, questions, results, score, maximum, overall,
                                  svc.settings.show_correct_answers)
 
@@ -165,26 +183,20 @@ async def send_result(bot: Bot, svc: Services, submission: dict[str, Any], block
     It is recorded as sent afterwards. If the process stops first, or Telegram fails for a reason
     that may pass, recover_grading sends it once more after RESULT_GRACE seconds.
     """
+    fields = dict(submission=submission["id"], user=submission["user_id"])
     try:
         await send_blocks(bot, submission["user_id"], blocks)
     except Forbidden:
         svc.db.set_user_active(submission["user_id"], False)
         svc.db.mark_result_sent(submission["id"])  # blocked: there is nobody to send it to
+        event(log, "result.blocked", **fields)
         return False
     except TelegramError as exc:
-        log.warning("Could not send result of submission %s to %s (will retry once): %s",
-                    submission["id"], submission["user_id"], exc)
+        event(log, "result.failed", logging.WARNING, **fields, retry=True, error=str(exc))
         return False
     svc.db.mark_result_sent(submission["id"])
+    event(log, "result.sent", **fields)
     return True
-
-
-async def notify_admins(bot: Bot, svc: Services, text: str) -> None:
-    for admin_id in svc.settings.admin_ids:
-        try:
-            await bot.send_message(admin_id, text)
-        except Exception:  # an admin who never started the bot cannot be messaged
-            log.debug("Could not notify admin %s", admin_id)
 
 
 GRADING_DELAYED = (
@@ -210,31 +222,31 @@ async def recover_grading(bot: Bot, svc: Services) -> int:
         handled += 1
         aid = submission["assessment_id"]
         if outcome == "gave_up":
-            log.error("Gave up grading submission %s after %s attempts", submission["id"],
-                      submission["grading_attempts"])
+            event(log, "grading.gave_up", logging.ERROR, submission=submission["id"], assessment=aid,
+                  user=submission["user_id"], attempts=submission["grading_attempts"])
             await _tell_student_grading_failed(bot, submission["user_id"])
-            await notify_admins(bot, svc, f"⚠️ Grading a submission to assessment #{aid} was interrupted "
-                                          f"{submission['grading_attempts']} times.\nRun /regrade {aid} to retry.")
+            await report_grading_failures(bot, svc)
             continue
-        log.info("Resuming grading of submission %s (attempt %s)", submission["id"], submission["grading_attempts"])
+        event(log, "grading.resumed", submission=submission["id"], assessment=aid,
+              attempt=submission["grading_attempts"])
         try:
             blocks = await grade(svc, submission["id"])
-        except AIError as exc:
-            log.error("Grading failed for submission %s: %s", submission["id"], exc)
+        except AIError:
             await _tell_student_grading_failed(bot, submission["user_id"])
-            await notify_admins(bot, svc, f"⚠️ Grading failed for a submission to assessment #{aid}: {exc}\n"
-                                          f"Run /regrade {aid} to retry.")
+            await report_grading_failures(bot, svc)
             continue
         if blocks is not None:
             await send_result(bot, svc, submission, blocks)
 
     while not svc.stopping.is_set() and (submission := svc.db.claim_unsent_result(RESULT_GRACE)) is not None:
         handled += 1
-        log.info("Sending the result of submission %s, which was graded but never sent", submission["id"])
+        fields = dict(submission=submission["id"], user=submission["user_id"], resent=True)
         try:
             await send_blocks(bot, submission["user_id"], student.stored_result_blocks(svc, submission))
         except TelegramError as exc:
-            log.warning("Could not send result of submission %s: %s", submission["id"], exc)
+            event(log, "result.failed", logging.WARNING, **fields, retry=False, error=str(exc))
+        else:
+            event(log, "result.sent", **fields)
     return handled
 
 
@@ -243,7 +255,8 @@ async def run_once(bot: Bot, svc: Services) -> None:
     """Finish everything left over. Each part is guarded so one failure does not stop the rest."""
     for name, step in (("sending", lambda: deliver(bot, svc)),
                        ("delivery reports", lambda: report_deliveries(bot, svc)),
-                       ("grading", lambda: recover_grading(bot, svc))):
+                       ("grading", lambda: recover_grading(bot, svc)),
+                       ("alerts", lambda: report_grading_failures(bot, svc))):
         try:
             await step()
         except asyncio.CancelledError:

@@ -5,7 +5,7 @@
 | Roadmap stage | Stage 4 in [ROADMAP.md](../../../ROADMAP.md) |
 | Branch | `claude/lucid-brahmagupta-dri4yd` |
 | Pull request | [#13](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/13) |
-| Status | In review |
+| Status | Merged |
 
 Items 1 to 7 came up during development; items 8 to 13 came from a review of the first complete
 version by a separate review agent, which compared `BotRunner` with python-telegram-bot's own run

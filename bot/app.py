@@ -9,6 +9,7 @@ from telegram.error import TelegramError
 from telegram.ext import Application, ApplicationBuilder, ContextTypes
 
 from .ai import AssessmentAI, build_provider
+from .alerts import AIMonitor
 from .config import Settings
 from .db import Database
 from .handlers import register_handlers
@@ -34,6 +35,7 @@ ADMIN_COMMANDS = [
     BotCommand("close", "Stop accepting answers for an assessment"),
     BotCommand("regrade", "Retry failed grading"),
     BotCommand("users", "Number of registered users"),
+    BotCommand("status", "Grading, sending and AI provider health"),
 ]
 
 
@@ -97,13 +99,14 @@ def build_application(settings: Settings, builder: ApplicationBuilder | None = N
         .build()
     )
     ai = AssessmentAI(build_provider(settings), settings.default_num_questions, settings.max_questions)
-    application.bot_data["services"] = Services(
+    services = application.bot_data["services"] = Services(
         settings=settings,
         db=Database(settings.database_url),
         ai=ai,
         # the provider is looked up on every use, so that it can be swapped (tests do)
         ocr=OCRService(settings.ocr, get_provider=lambda: ai.provider),
     )
+    ai.observer = AIMonitor(services, application.bot)  # alerts the admins when the AI is down
     register_handlers(application)
     application.add_error_handler(_on_error)
     return application

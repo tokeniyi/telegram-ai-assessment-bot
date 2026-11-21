@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+import time
+from typing import Any, Protocol
 
-from .providers import AIError, AIProvider
+from ..logs import event
+from .providers import AIError, AIProvider, AIUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -197,17 +199,44 @@ def normalize_grades(payload: dict[str, Any], questions: list[dict[str, Any]]) -
     return results, str(payload.get("overall_feedback") or "").strip()
 
 
+class AIObserver(Protocol):
+    """Told the outcome of every request, to follow whether the provider is up (bot/alerts.py)."""
+
+    async def ai_succeeded(self) -> None: ...
+
+    async def ai_unavailable(self, error: AIUnavailable) -> None: ...
+
+
 class AssessmentAI:
-    def __init__(self, provider: AIProvider, default_num_questions: int, max_questions: int):
+    def __init__(self, provider: AIProvider, default_num_questions: int, max_questions: int,
+                 observer: AIObserver | None = None):
         self.provider = provider
         self.default_num_questions = default_num_questions
         self.max_questions = max_questions
+        self.observer = observer
 
-    async def _json_call(self, system: str, user: str, validate):
+    async def _complete(self, kind: str, system: str, user: str) -> str:
+        """One request to the provider, logged and reported to the observer."""
+        started = time.monotonic()
+        try:
+            reply = await self.provider.complete(system, user)
+        except AIUnavailable as exc:
+            event(log, "ai.unavailable", logging.WARNING, kind=kind, model=getattr(self.provider, "model", None),
+                  seconds=time.monotonic() - started, error=str(exc))
+            if self.observer:
+                await self.observer.ai_unavailable(exc)
+            raise
+        event(log, "ai.request", logging.DEBUG, kind=kind, model=getattr(self.provider, "model", None),
+              seconds=time.monotonic() - started)
+        if self.observer:
+            await self.observer.ai_succeeded()  # a reply arrived, usable or not: the provider is up
+        return reply
+
+    async def _json_call(self, system: str, user: str, validate, kind: str = "other"):
         """Call the model and validate its JSON, retrying once if the reply is malformed."""
         last_error: Exception | None = None
         for attempt in (1, 2):
-            reply = await self.provider.complete(system, user)
+            reply = await self._complete(kind, system, user)
             try:
                 return validate(parse_json_object(reply))
             except (ValueError, TypeError) as exc:
@@ -224,7 +253,8 @@ class AssessmentAI:
             f"Teacher's instructions: {instructions.strip() if instructions and instructions.strip() else 'none'}"
         )
         return await self._json_call(
-            GENERATE_SYSTEM, user, lambda payload: normalize_questions(payload, self.max_questions)
+            GENERATE_SYSTEM, user, lambda payload: normalize_questions(payload, self.max_questions),
+            kind="generate",
         )
 
     async def explain(self, material: str, question: str | None = None) -> str:
@@ -236,7 +266,7 @@ class AssessmentAI:
             return text.strip()
 
         user = f"<material>\n{material}\n</material>\n\n<question>\n{(question or '').strip() or 'none'}\n</question>"
-        return await self._json_call(EXPLAIN_SYSTEM, user, validate)
+        return await self._json_call(EXPLAIN_SYSTEM, user, validate, kind="explain")
 
     async def converse(
         self, message: str, history: list[tuple[str, str]], context: str, can_answer: bool,
@@ -264,7 +294,7 @@ class AssessmentAI:
             f"<context>\n{context}\n</context>\n\n<history>\n{transcript}\n</history>\n\n"
             f"<message>\n{message}\n</message>"
         )
-        return await self._json_call(CHAT_SYSTEM, user, validate)
+        return await self._json_call(CHAT_SYSTEM, user, validate, kind="chat")
 
     async def grade(self, questions: list[dict[str, Any]], submission: str) -> tuple[list[dict], str]:
         """Return (per-question results, overall feedback) for a student's raw submission."""
@@ -279,5 +309,5 @@ class AssessmentAI:
             f"<submission>\n{submission}\n</submission>"
         )
         return await self._json_call(
-            GRADE_SYSTEM, user, lambda payload: normalize_grades(payload, questions)
+            GRADE_SYSTEM, user, lambda payload: normalize_grades(payload, questions), kind="grade",
         )
