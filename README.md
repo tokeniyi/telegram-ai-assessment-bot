@@ -9,6 +9,7 @@ A Telegram bot that turns study material into graded assessments:
 5. Admins see the scores in the chat and can download a CSV.
 
 Full notes on what changed and what to know before running it: [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md).
+Planned work, stage by stage: [ROADMAP.md](ROADMAP.md).
 
 ## Setup
 
