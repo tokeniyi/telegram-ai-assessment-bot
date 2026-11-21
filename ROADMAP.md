@@ -13,7 +13,7 @@ Stages 5 to 7 are independent of each other.
 | 2 | Each Telegram update handled once | ✅ Done ([#10](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/10)) |
 | 3 | Work that survives a restart | ✅ Done ([#12](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/12)) |
 | 4 | Safer deploys | ✅ Done ([#13](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/13)) |
-| 5 | Visibility for the admin | 🔍 In review ([phase 05 docs](docs/implementations/phase-05/summary.md)) |
+| 5 | Visibility for the admin | 🔍 In review ([#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14), [phase 05 docs](docs/implementations/phase-05/summary.md)) |
 | 6 | Assessment features | Proposed |
 | 7 | Scale and limits | Proposed |
 

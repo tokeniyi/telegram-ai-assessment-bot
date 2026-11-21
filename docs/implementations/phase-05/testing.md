@@ -4,8 +4,8 @@
 |---|---|
 | Roadmap stage | Stage 5 in [ROADMAP.md](../../../ROADMAP.md) |
 | Branch | `claude/lucid-brahmagupta-dri4yd` |
-| Pull request | not opened yet |
-| Status | In progress |
+| Pull request | [#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14) |
+| Status | In review |
 
 ## Methodology
 

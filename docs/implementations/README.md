@@ -10,7 +10,7 @@ are in [CLAUDE.md](../../CLAUDE.md).
 | 02 | Each Telegram update handled once | `claude/idempotent-updates` | [#10](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/10) | Merged | [overview](phase-02/overview.md) · [implementation](phase-02/implementation.md) · [issues](phase-02/issues-and-fixes.md) · [testing](phase-02/testing.md) · [summary](phase-02/summary.md) |
 | 03 | Work that survives a restart | `claude/lucid-brahmagupta-dri4yd` | [#12](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/12) | Merged | [overview](phase-03/overview.md) · [implementation](phase-03/implementation.md) · [issues](phase-03/issues-and-fixes.md) · [testing](phase-03/testing.md) · [summary](phase-03/summary.md) |
 | 04 | Safer deploys | `claude/lucid-brahmagupta-dri4yd` | [#13](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/13) | Merged | [overview](phase-04/overview.md) · [implementation](phase-04/implementation.md) · [issues](phase-04/issues-and-fixes.md) · [testing](phase-04/testing.md) · [summary](phase-04/summary.md) |
-| 05 | Visibility for the admin | `claude/lucid-brahmagupta-dri4yd` | PR_LINK | In review | [overview](phase-05/overview.md) · [implementation](phase-05/implementation.md) · [issues](phase-05/issues-and-fixes.md) · [testing](phase-05/testing.md) · [summary](phase-05/summary.md) |
+| 05 | Visibility for the admin | `claude/lucid-brahmagupta-dri4yd` | [#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14) | In review | [overview](phase-05/overview.md) · [implementation](phase-05/implementation.md) · [issues](phase-05/issues-and-fixes.md) · [testing](phase-05/testing.md) · [summary](phase-05/summary.md) |
 
 ## Before the staged roadmap
 
