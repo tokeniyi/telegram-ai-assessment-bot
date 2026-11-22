@@ -1,6 +1,6 @@
 # Roadmap
 
-The planned order of work on the bot. Stages 1 to 4 are done and Stages 5 and 6 are in review. The
+The planned order of work on the bot. Stages 1 to 6 are done. The
 stages after them are proposals and can be reordered. What was built in each stage, and how it was tested,
 is in [docs/implementations](docs/implementations/README.md).
 
@@ -14,8 +14,8 @@ the proposed stages after it were renumbered (Assessment features 6 → 7, Scale
 | 2 | Each Telegram update handled once | ✅ Done ([#10](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/10)) |
 | 3 | Work that survives a restart | ✅ Done ([#12](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/12)) |
 | 4 | Safer deploys | ✅ Done ([#13](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/13)) |
-| 5 | Visibility for the admin | 🔍 In review ([#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14), [phase 05 docs](docs/implementations/phase-05/summary.md)) |
-| 6 | Command guidance | 🔍 In review ([#15](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/15), [phase 06 docs](docs/implementations/phase-06/summary.md)) |
+| 5 | Visibility for the admin | ✅ Done ([#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14), [phase 05 docs](docs/implementations/phase-05/summary.md)) |
+| 6 | Command guidance | ✅ Done ([#15](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/15), [phase 06 docs](docs/implementations/phase-06/summary.md)) |
 | 7 | Assessment features | Proposed |
 | 8 | Scale and limits | Proposed |
 
