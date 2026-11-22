@@ -27,9 +27,11 @@ def keyboard(*choices: str, labels: dict[str, str] | None = None) -> InlineKeybo
     return InlineKeyboardMarkup([[InlineKeyboardButton(labels[c], callback_data=f"chk:{c}") for c in choices]])
 
 
-def offer(settings) -> tuple[str, InlineKeyboardMarkup]:
-    """The question added to a student's first /start (HTML) and its buttons."""
-    text = (f"\n\n📅 <b>Study check-ins</b>\nWould you like me to message you {checkins.every(settings.checkin_days)} "
+def offer(settings, announcement: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+    """The question added to a student's first /start (HTML) and its buttons. With `announcement`,
+    the message sent once to students who registered before check-ins existed."""
+    head = "📅 <b>New: study check-ins</b>" if announcement else "\n\n📅 <b>Study check-ins</b>"
+    text = (f"{head}\nWould you like me to message you {checkins.every(settings.checkin_days)} "
             "to see how your studying is going? Reply to any check-in if you're stuck and I'll help. "
             "You can stop them at any time.")
     return text, keyboard("on", "off", labels={"on": "✅ Yes, check in on me", "off": "No thanks"})

@@ -48,6 +48,7 @@ from ..commands import Suggestion
 from ..logs import event
 from ..utils import Services, esc, pack_blocks, send_blocks, total_points
 from . import student
+from .checkins import offer as checkin_offer
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ RESULT_GRACE = 300           # seconds a graded result may stay unsent before an
 AUTO_REGRADE_DELAY = 300     # seconds after a failure before the bot retries it (doubled each retry)
 AUTO_REGRADE_PER_PASS = 5    # failed submissions retried per background pass, to spare the AI's limits
 CHECKINS_PER_PASS = 10       # check-ins written and sent per pass (one AI call each), so that a pass stays short
+CHECKIN_OFFERS_PER_PASS = 25  # one-time announcements to students never asked, per pass
 CHECKIN_LOG_DAYS = 90        # how long /status's record of sent check-ins is kept
 
 
@@ -396,6 +398,36 @@ def checkin_markup(svc: Services, user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+async def announce_checkins(bot: Bot, svc: Services) -> int:
+    """Offer check-ins once to active students who were never asked (they registered before the
+    feature existed, or never sent /start). The database hands each one to one process, once ever
+    (Database.claim_checkin_offers), so it is sent at most once. Returns how many were taken."""
+    settings = svc.settings
+    if not settings.checkin_days:
+        return 0
+    taken = 0
+    while not svc.stopping.is_set():
+        user_ids = svc.db.claim_checkin_offers(CHECKIN_OFFERS_PER_PASS, sorted(settings.admin_ids))
+        if not user_ids:
+            break
+        text, markup = checkin_offer(settings, announcement=True)
+        for user_id in user_ids:
+            taken += 1
+            try:
+                await bot.send_message(user_id, text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            except Forbidden:
+                svc.db.set_user_active(user_id, False)
+                svc.db.set_checkins(user_id, "blocked")
+                event(log, "checkin.offer_blocked", user=user_id)
+            except TelegramError as exc:  # not repeated: they can still find /checkins
+                event(log, "checkin.offer_failed", logging.WARNING, user=user_id, error=str(exc))
+            else:
+                event(log, "checkin.offered", user=user_id)
+            await asyncio.sleep(SEND_DELAY)
+        break  # the rest in the next pass, so that one pass stays short
+    return taken
+
+
 async def send_checkins(bot: Bot, svc: Services) -> int:
     """Send the check-ins that are due, each at most once (Database.claim_checkin), up to
     CHECKINS_PER_PASS. Returns how many were sent or attempted."""
@@ -446,6 +478,7 @@ async def run_once(bot: Bot, svc: Services) -> None:
                        ("delivery reports", lambda: report_deliveries(bot, svc)),
                        ("grading", lambda: recover_grading(bot, svc)),
                        ("automatic regrading", lambda: auto_regrade(bot, svc)),
+                       ("check-in announcement", lambda: announce_checkins(bot, svc)),
                        ("check-ins", lambda: send_checkins(bot, svc)),
                        ("alerts", lambda: report_grading_failures(bot, svc))):
         try:

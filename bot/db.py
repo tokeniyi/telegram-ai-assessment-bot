@@ -511,6 +511,21 @@ class Database:
             "INSERT INTO study_checkins (user_id, status) VALUES (%s, 'offered') "
             "ON CONFLICT DO NOTHING RETURNING user_id", (user_id,)) is not None
 
+    def claim_checkin_offers(self, limit: int, exclude: list[int]) -> list[int]:
+        """Take up to `limit` active users who were never offered check-ins (they registered before
+        the feature, or never sent /start) and record them as offered. Each user is returned to one
+        process only, once ever (the insert decides; a competing insert of the same user does
+        nothing). Users in `exclude` (the admins) are never taken."""
+        rows = self._all(
+            """INSERT INTO study_checkins (user_id, status)
+               SELECT u.user_id, 'offered' FROM users u
+               WHERE u.is_active AND NOT (u.user_id = ANY(%s::bigint[]))
+                 AND NOT EXISTS (SELECT 1 FROM study_checkins c WHERE c.user_id = u.user_id)
+               ORDER BY u.user_id LIMIT %s
+               ON CONFLICT DO NOTHING RETURNING user_id""",
+            (list(exclude), limit))
+        return sorted(r["user_id"] for r in rows)
+
     def get_checkins(self, user_id: int) -> dict[str, Any] | None:
         return self._one("SELECT * FROM study_checkins WHERE user_id = %s", (user_id,))
 

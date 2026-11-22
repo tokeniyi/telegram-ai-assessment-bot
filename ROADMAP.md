@@ -145,7 +145,7 @@ above do not depend on them.
 
 | Feature | Status | Docs |
 |---|---|---|
-| Study check-ins | 🔍 In review ([#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19)) | [feature-study-checkins](docs/implementations/feature-study-checkins/summary.md) |
+| Study check-ins | ✅ Done ([#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19)); announcement 🔍 in review ([#20](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/20)) | [feature-study-checkins](docs/implementations/feature-study-checkins/summary.md) |
 
 ### Study check-ins
 
@@ -153,6 +153,7 @@ Added on 2026-11-22 at the user's request. The bot writes to students between as
 about them.
 
 - Students are offered check-ins once, at `/start`, and choose with `/checkins on|off|pause`.
+  Students who registered before the feature are asked once by a background announcement (#20).
 - A student who says yes gets a short AI-written message every `CHECKIN_DAYS` (3) days at
   `CHECKIN_HOUR`. It suggests something to review: an assessment still open, a question they lost
   points on, or something they asked. It also invites them to reply if they are stuck.

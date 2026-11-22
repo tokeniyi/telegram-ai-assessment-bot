@@ -4,8 +4,8 @@
 |---|---|
 | Roadmap stage | None. This is a side feature, outside the staged roadmap ([ROADMAP.md](../../../ROADMAP.md), "Outside the stages") |
 | Branch | `claude/modest-allen-wfagwm` |
-| Pull request | [#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19) |
-| Status | In review |
+| Pull request | [#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19) (the feature), [#20](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/20) (the one-time announcement) |
+| Status | #19 merged; #20 in review |
 
 ## Methodology
 
@@ -31,10 +31,13 @@
     (1 failed, 20 passed).
   - `decide` not moving `next_at` before sending: 8 tests fail, including
     `test_a_check_in_cut_off_by_a_crash_is_not_sent_twice`.
+  - Announcement (#20), the claim made repeatable (`ON CONFLICT … DO UPDATE`, no `NOT EXISTS`):
+    3 tests fail. Admins not excluded: 1 fails. (The first run of the repeatable claim hung in the
+    thread test's unbounded loop; the loop is now bounded so it fails instead.)
 
 ## Tests added
 
-All in [tests/test_checkins.py](../../../tests/test_checkins.py). The file collects 21 tests, because
+All in [tests/test_checkins.py](../../../tests/test_checkins.py). The file collects 26 tests (21 with #19, 5 more with #20), because
 `test_decide` has 5 cases.
 
 | Test | Behaviour checked |
@@ -57,6 +60,16 @@ All in [tests/test_checkins.py](../../../tests/test_checkins.py). The file colle
 | `test_status_shows_check_ins` | The `/status` section |
 | `test_two_processes_claiming_at_the_same_moment_send_one_check_in` | Real concurrent claims: one "send", one "nothing due" |
 
+Added with the announcement (#20):
+
+| Test | Behaviour checked |
+|---|---|
+| `test_students_registered_before_check_ins_are_asked_once` | Two processes and repeated passes: each earlier student asked once; not admins, blocked users, users who chose, or users asked at `/start`; Yes works |
+| `test_the_announcement_is_spread_over_passes` | 25 per pass; the rest in the next pass, each once |
+| `test_a_student_who_blocked_the_bot_is_marked_by_the_announcement` | 403: inactive and `blocked` |
+| `test_no_announcement_when_check_ins_are_switched_off` | `CHECKIN_DAYS=0`: nothing sent, no row written |
+| `test_two_processes_announcing_at_once_take_each_student_once` | Real threads, 200 users: everyone taken once, nobody twice |
+
 One existing test was changed: `tests/test_ocr_flow.py::test_explain_caption_wins_over_an_open_assessment`
 (see [issues-and-fixes.md](issues-and-fixes.md), item 1).
 
@@ -67,7 +80,8 @@ with the CI credentials. Before the change, the suite had 324 passed and 2 skipp
 
 ```
 python -m pytest -q
-345 passed, 2 skipped in 119.87s (0:01:59)
+345 passed, 2 skipped in 119.87s (0:01:59)      # PR #19
+350 passed, 2 skipped in 143.02s (0:02:23)      # PR #20, with the announcement
 ```
 
 The 2 skipped tests were skipped before this change too.

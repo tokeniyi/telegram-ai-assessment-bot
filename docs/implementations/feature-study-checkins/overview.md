@@ -4,8 +4,8 @@
 |---|---|
 | Roadmap stage | None. This is a side feature, outside the staged roadmap ([ROADMAP.md](../../../ROADMAP.md), "Outside the stages") |
 | Branch | `claude/modest-allen-wfagwm` |
-| Pull request | [#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19) |
-| Status | In review |
+| Pull request | [#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19) (the feature), [#20](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/20) (the one-time announcement) |
+| Status | #19 merged; #20 in review |
 
 ## Objective
 
@@ -37,6 +37,9 @@ In:
   questions the student lost points on, and what they recently asked.
 - **Built-in message** when the AI provider is down or its reply is unusable.
 - **Replies.** Each check-in is saved in the chat history, so a reply is ordinary chat with context.
+- **One-time announcement (PR #20).** Students who registered before the feature (or never sent
+  `/start`) are sent the same question once. The user asked for this on 2026-11-22, after #19 was
+  merged.
 - **`/status`** shows who receives check-ins, how many were sent, failed or stopped because the
   student blocked the bot.
 
@@ -45,8 +48,6 @@ Out:
 - Study-session memory. It does not exist yet. The design leaves room for it as one more fact
   source (`bot/checkins.py`, `SOURCES`).
 - A check-in hour or interval chosen by each student. There is one bot-wide setting.
-- Offering check-ins to users who registered before this feature, unless they send `/start` again
-  or use `/checkins` (see [summary.md](summary.md), outstanding issues).
 - Offering check-ins to admins. They can still use `/checkins`.
 
 ## Expected outcome
