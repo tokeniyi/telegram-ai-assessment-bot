@@ -90,7 +90,11 @@ them too, so you can test the whole flow from a single account.
 - `/settings <id>` — the deadline, and whether students of this assessment see reference answers and
   may resubmit (by default `SHOW_CORRECT_ANSWERS` and `ALLOW_RESUBMISSION`); buttons change them.
   The draft preview has a **⚙️ Settings** button.
-- `/regrade <id>` — grade submissions whose grading failed (for example, the AI provider was down)
+- `/regrade <id>` — grade submissions whose grading failed (for example, the AI provider was down).
+  The bot also retries them by itself once the provider answers again (`AUTO_REGRADE_ATTEMPTS`, 3),
+  and tells you when it did.
+- `/resend <id>` — send an open assessment again to the users it could not reach (a timeout, or 3
+  failed attempts). Some may already have it, so they may receive it twice.
 - `/users` — number of registered users
 - `/status` — grading waiting or failed, assessment messages queued or failed, and whether the AI
   provider answers right now (see [Monitoring](#monitoring))
@@ -286,7 +290,8 @@ Tesseract and EasyOCR run only where those engines are installed.
   stored in PostgreSQL, so a restart or redeploy does not lose them. Sending a published assessment
   and grading a submission also survive a restart: on start (and every 30 seconds) the bot sends the
   assessment to the students still waiting for it and grades submissions whose grading was cut off.
-  A submission whose grading fails (or is cut off 3 times) is kept, and `/regrade` retries it.
+  A submission whose grading fails (or is cut off 3 times) is kept; the bot retries it by itself
+  once the AI provider answers again, and `/regrade` retries it at once.
 - Answers stop at the deadline itself; the assessment is marked closed, and its publisher told, within
   30 seconds. Each reminder is sent at most once: a bot stopped just as it sends one does not repeat it.
   Answers saved but not submitted by the deadline are not submitted automatically.

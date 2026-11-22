@@ -39,7 +39,8 @@ from telegram.ext import Application
 
 from .. import deadlines, guidance
 from ..ai import AIError
-from ..alerts import report_grading_failures
+from ..alerts import report_grading_failures, report_regraded
+from ..commands import Suggestion
 from ..logs import event
 from ..utils import Services, esc, pack_blocks, send_blocks, total_points
 from . import student
@@ -53,6 +54,8 @@ DELIVERY_RETRY_DELAY = 60    # seconds before retrying a send that failed for a 
 MAX_DELIVERY_ATTEMPTS = 3
 MAX_GRADING_ATTEMPTS = 3     # grading runs that may be cut short before a submission is 'failed'
 RESULT_GRACE = 300           # seconds a graded result may stay unsent before another process sends it
+AUTO_REGRADE_DELAY = 300     # seconds after a failure before the bot retries it (doubled each retry)
+AUTO_REGRADE_PER_PASS = 5    # failed submissions retried per background pass, to spare the AI's limits
 
 
 def grading_lease(services: Services) -> float:
@@ -134,7 +137,8 @@ def delivery_report(assessment_id: int, counts: dict[str, int]) -> str:
     if counts.get("blocked"):
         report += f"\n{counts['blocked']} blocked the bot and were skipped."
     if counts.get("failed"):
-        report += f"\n{counts['failed']} could not be reached (/status lists them)."
+        report += (f"\n{counts['failed']} could not be reached.\n👉 "
+                   + Suggestion("resend", (str(assessment_id),), why="Try them again").html())
     if counts.get("cancelled"):
         report += f"\n{counts['cancelled']} were not sent because the assessment was closed."
     if not sent:  # nobody received it: there will be no scores to follow
@@ -165,7 +169,7 @@ async def report_deliveries(bot: Bot, svc: Services, assessment_id: int | None =
 
 
 # ── grading ──────────────────────────────────────────────────────────────
-async def grade(svc: Services, submission_id: int) -> list[str] | None:
+async def grade(svc: Services, submission_id: int, notify_failure: bool = True) -> list[str] | None:
     """Grade a submission the caller has claimed, save the grade and return the result blocks.
 
     Returns None if another process saved a grade first (its result is that process's to send).
@@ -181,7 +185,7 @@ async def grade(svc: Services, submission_id: int) -> list[str] | None:
     try:
         results, overall = await svc.ai.grade(questions, submission["raw_text"])
     except AIError as exc:
-        svc.db.mark_submission_failed(submission_id, str(exc))
+        svc.db.mark_submission_failed(submission_id, str(exc), notify=notify_failure)
         event(log, "grading.failed", logging.ERROR, **fields, seconds=time.monotonic() - started, error=str(exc))
         raise
     score = round(sum(r["awarded"] for r in results), 2)
@@ -224,7 +228,7 @@ async def send_result(bot: Bot, svc: Services, submission: dict[str, Any], block
 
 GRADING_DELAYED = (
     "✅ Your answers are saved, but grading is temporarily unavailable. "
-    "You don't need to submit again. Your result will be sent after the administrator retries grading."
+    "You don't need to submit again. Your result will be sent to you here as soon as grading is retried."
 )
 
 
@@ -271,6 +275,40 @@ async def recover_grading(bot: Bot, svc: Services) -> int:
         else:
             event(log, "result.sent", **fields)
     return handled
+
+
+# ── failed grading, retried by the bot itself (Stage 8) ─────────────────
+async def auto_regrade(bot: Bot, svc: Services) -> int:
+    """Grade again a few failed submissions, once the AI provider answers (Database.claim_auto_regrade),
+    send their results and tell the admins (batched). Returns how many were graded.
+
+    The admins were told about the failure already, so a retry that fails again is reported only
+    when it was the last one; the student, who was told their answers are saved, is not messaged.
+    The pass stops at the first failure: the provider is probably failing again.
+    """
+    limit = svc.settings.auto_regrade_attempts
+    graded = 0
+    if limit:
+        lease = grading_lease(svc)
+        for _ in range(AUTO_REGRADE_PER_PASS):
+            if svc.stopping.is_set():
+                break
+            submission = svc.db.claim_auto_regrade(lease, limit, AUTO_REGRADE_DELAY)
+            if submission is None:
+                break
+            event(log, "grading.auto_retry", submission=submission["id"], assessment=submission["assessment_id"],
+                  retry=submission["auto_regrades"], of=limit)
+            try:
+                blocks = await grade(svc, submission["id"], notify_failure=submission["auto_regrades"] >= limit)
+            except AIError:
+                break
+            if blocks is None:  # graded meanwhile by someone else, who sends the result
+                continue
+            graded += 1
+            svc.db.mark_regraded_notice_due(submission["id"])
+            await send_result(bot, svc, submission, blocks)
+    await report_regraded(bot, svc)  # also what earlier passes left to report
+    return graded
 
 
 # ── deadlines (Stage 7) ──────────────────────────────────────────────────
@@ -352,6 +390,7 @@ async def run_once(bot: Bot, svc: Services) -> None:
                        ("reminders", lambda: send_reminders(bot, svc)),
                        ("delivery reports", lambda: report_deliveries(bot, svc)),
                        ("grading", lambda: recover_grading(bot, svc)),
+                       ("automatic regrading", lambda: auto_regrade(bot, svc)),
                        ("alerts", lambda: report_grading_failures(bot, svc))):
         try:
             await step()

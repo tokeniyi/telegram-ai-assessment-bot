@@ -55,8 +55,17 @@ def clock(moment: datetime | None) -> str:
     return moment.strftime("%H:%M UTC" if same_day else "%d %b %H:%M UTC")
 
 
-def grading_failure_notice(rows: list[dict[str, Any]]) -> tuple[str, list[Suggestion]]:
-    """The notice (HTML) and a /regrade suggestion for each assessment in it."""
+AUTO_RETRY_NOTE = "The bot retries failed grading by itself once the AI answers again; you can also retry now."
+
+
+def grading_failure_notice(rows: list[dict[str, Any]], auto_retry: bool = False) -> tuple[str, list[Suggestion]]:
+    """The notice (HTML) and a /regrade suggestion for each assessment in it. `auto_retry`: say
+    that the bot retries them itself (Stage 8)."""
+    text, retry = _grading_failure_text(rows)
+    return (f"{text}\n{AUTO_RETRY_NOTE}" if auto_retry else text), retry
+
+
+def _grading_failure_text(rows: list[dict[str, Any]]) -> tuple[str, list[Suggestion]]:
     counts: dict[int, int] = {}
     for row in rows:
         counts[row["assessment_id"]] = counts.get(row["assessment_id"], 0) + 1
@@ -87,7 +96,40 @@ async def report_grading_failures(bot: Bot, svc: Services, force: bool = False) 
     if rows:
         event(log, "alert.grading_failed", logging.WARNING, failures=len(rows),
               assessments=",".join(sorted({str(r["assessment_id"]) for r in rows})))
-        await notify_admins(bot, svc, *grading_failure_notice(rows))
+        await notify_admins(bot, svc, *grading_failure_notice(rows, auto_retry=_auto_retry_left(svc, rows)))
+    return len(rows)
+
+
+def _auto_retry_left(svc: Services, rows: list[dict[str, Any]]) -> bool:
+    """Whether the bot will still retry any of these failures by itself."""
+    limit = svc.settings.auto_regrade_attempts
+    return bool(limit) and any(r.get("auto_regrades", 0) < limit for r in rows)
+
+
+async def report_regraded(bot: Bot, svc: Services) -> int:
+    """Tell the admins about grading the bot retried by itself and that worked (Stage 8): the first
+    at once, later ones together at most every GRADING_NOTICE_INTERVAL. Returns how many."""
+    try:
+        rows = svc.db.claim_regraded_notice(GRADING_NOTICE_INTERVAL)
+        still_failed = svc.db.failed_grading_by_assessment() if rows else []
+    except Exception:
+        log.exception("Could not check for regraded submissions to report")
+        return 0
+    if not rows:
+        return 0
+    counts: dict[int, int] = {}
+    for row in rows:
+        counts[row["assessment_id"]] = counts.get(row["assessment_id"], 0) + 1
+    event(log, "alert.auto_regraded", submissions=len(rows), assessments=",".join(map(str, sorted(counts))))
+    where = ", ".join(f"#{aid}: {n}" for aid, n in sorted(counts.items()))
+    text = (f"🔁 Grading that had failed was retried automatically: {guidance.plural(len(rows), 'submission')} "
+            f"graded ({where}), and the students were sent their results. No action needed.")
+    suggestions = []
+    if still_failed:
+        total = sum(r["n"] for r in still_failed)
+        text += f"\n{total} still could not be graded."
+        suggestions = guidance.regrade_suggestions(svc.db)
+    await notify_admins(bot, svc, text, suggestions)
     return len(rows)
 
 
@@ -135,5 +177,7 @@ class AIMonitor:
         if failed:
             total = sum(r["n"] for r in failed)
             text += f"\n{total} submission{'s are' if total != 1 else ' is'} waiting to be graded."
+            if self.svc.settings.auto_regrade_attempts:
+                text += " The bot grades them again by itself within a few minutes; you can also retry now."
             retry = guidance.regrade_suggestions(self.svc.db)
         await notify_admins(self.bot, self.svc, text, retry)

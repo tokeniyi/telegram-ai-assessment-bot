@@ -144,6 +144,10 @@ CREATE TABLE IF NOT EXISTS reminders (
     last_error     TEXT,
     PRIMARY KEY (assessment_id, user_id)
 );
+-- Stage 8: failed grading retried by the bot itself, and whether the admins are still to be told
+-- that it worked (batched like failure notices).
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS auto_regrades INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS regraded_notice_due BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS idx_submissions_pending ON submissions(id) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_questions_assessment ON questions(assessment_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_lookup ON submissions(assessment_id, user_id);
@@ -518,6 +522,33 @@ class Database:
         )
         return row["status"] if row else "cancelled"
 
+    def requeue_failed_deliveries(self, assessment_id: int) -> list[int]:
+        """/resend (Stage 8): queue again the messages of an open assessment that failed to send.
+        Returns the users queued; a second call finds them no longer 'failed' and queues nobody,
+        so a double tap or two processes cannot send a copy twice. Blocked users are not included."""
+        rows = self._all(
+            f"""UPDATE deliveries d SET status = 'pending', attempts = 0, claimed_until = NULL, last_error = NULL
+                FROM assessments a
+                WHERE a.id = d.assessment_id AND d.assessment_id = %s AND d.status = 'failed' AND {OPEN}
+                RETURNING d.user_id""",
+            (assessment_id,),
+        )
+        return sorted(r["user_id"] for r in rows)
+
+    def delivery_statuses(self, assessment_id: int, user_ids: list[int]) -> dict[str, int]:
+        rows = self._all("""SELECT status, COUNT(*) AS n FROM deliveries
+                            WHERE assessment_id = %s AND user_id = ANY(%s) GROUP BY status""",
+                         (assessment_id, user_ids))
+        return {r["status"]: r["n"] for r in rows}
+
+    def failed_deliveries_by_assessment(self) -> list[dict[str, Any]]:
+        """Open assessments with messages that failed to send (what /resend can act on), newest first."""
+        return self._all(
+            f"""SELECT d.assessment_id, COUNT(*) AS n FROM deliveries d
+                JOIN assessments a ON a.id = d.assessment_id AND {OPEN}
+                WHERE d.status = 'failed' GROUP BY d.assessment_id ORDER BY d.assessment_id DESC"""
+        )
+
     def delivery_counts(self, assessment_id: int) -> dict[str, int]:
         rows = self._all(
             "SELECT status, COUNT(*) AS n FROM deliveries WHERE assessment_id = %s GROUP BY status",
@@ -598,13 +629,14 @@ class Database:
         """For an assessment published to nobody: its (empty) report has been sent."""
         self._run("UPDATE assessments SET delivery_reported_at = now() WHERE id = %s", (assessment_id,))
 
-    def mark_submission_failed(self, submission_id: int, error: str | None = None) -> None:
-        """Grading failed; the submission waits for /regrade and the admins are to be told."""
+    def mark_submission_failed(self, submission_id: int, error: str | None = None, notify: bool = True) -> None:
+        """Grading failed; the submission waits for a retry (automatic, or /regrade). The admins are
+        to be told unless `notify` is False (an automatic retry of one they were already told about)."""
         self._run(
             "UPDATE submissions SET status = 'failed', grading_claimed_until = NULL, grading_error = %s, "
-            "failed_at = now(), failure_notice_due = TRUE "
+            "failed_at = now(), failure_notice_due = failure_notice_due OR %s "
             "WHERE id = %s AND status != 'graded'",
-            (error, submission_id),
+            (error, notify, submission_id),
         )
 
     # ── grading that survives a restart ──────────────────────────────────
@@ -641,6 +673,55 @@ class Database:
                 (lease_seconds, row["id"]),
             ).fetchone()
             return "claimed", row
+
+    def claim_auto_regrade(self, lease_seconds: float, max_auto: int, delay_seconds: float) -> dict[str, Any] | None:
+        """Take the next failed submission for the bot to grade again by itself (Stage 8), or None.
+
+        Only while the AI provider is answering (its last request got a reply: no failures in a
+        row), and only `delay_seconds` × 2^(retries so far) after the failure, at most `max_auto`
+        times per submission; after that it waits for /regrade. The submission is leased exactly
+        like a /regrade (claim_for_regrade), so the two never grade it at the same time.
+        """
+        return self._one(
+            """UPDATE submissions SET status = 'pending', grading_attempts = grading_attempts + 1,
+                      auto_regrades = auto_regrades + 1,
+                      grading_claimed_until = now() + make_interval(secs => %s)
+               WHERE id = (
+                   SELECT s.id FROM submissions s
+                   WHERE s.status = 'failed' AND s.auto_regrades < %s
+                     AND COALESCE(s.failed_at, s.created_at::timestamptz)
+                         < now() - make_interval(secs => %s * power(2, s.auto_regrades))
+                     AND (SELECT consecutive_failures FROM ai_health WHERE id = 1) = 0
+                   ORDER BY s.id LIMIT 1 FOR UPDATE SKIP LOCKED)
+               RETURNING *""",
+            (lease_seconds, max_auto, delay_seconds),
+        )
+
+    def mark_regraded_notice_due(self, submission_id: int) -> None:
+        self._run("UPDATE submissions SET regraded_notice_due = TRUE WHERE id = %s", (submission_id,))
+
+    def claim_regraded_notice(self, min_interval: float) -> list[dict[str, Any]]:
+        """Submissions the bot graded again by itself that the admins have not been told about, each
+        returned once, to one caller; nothing while the last such notice is under `min_interval`
+        seconds old (the background loop sends what is left later)."""
+        with self._pool.connection() as conn:
+            conn.execute("""INSERT INTO admin_notices (kind, notified_at) VALUES ('auto_regraded', '-infinity')
+                            ON CONFLICT DO NOTHING""")
+            last = conn.execute("""SELECT notified_at > now() - make_interval(secs => %s) AS recent
+                                   FROM admin_notices WHERE kind = 'auto_regraded' FOR UPDATE""",
+                                (min_interval,)).fetchone()
+            if last["recent"]:
+                return []
+            rows = conn.execute("""UPDATE submissions SET regraded_notice_due = FALSE
+                                   WHERE regraded_notice_due RETURNING id, assessment_id""").fetchall()
+            if rows:
+                conn.execute("UPDATE admin_notices SET notified_at = now() WHERE kind = 'auto_regraded'")
+            return sorted(rows, key=lambda r: r["id"])
+
+    def auto_retry_pending(self, max_auto: int) -> int:
+        """Failed submissions the bot will still retry by itself."""
+        return self._one("SELECT COUNT(*) AS n FROM submissions WHERE status = 'failed' AND auto_regrades < %s",
+                         (max_auto,))["n"]
 
     def claim_for_regrade(self, submission_id: int, lease_seconds: float) -> bool:
         """Take a submission for /regrade: a failed one, or a pending one nobody is grading.
@@ -755,7 +836,7 @@ class Database:
             rows = conn.execute(
                 """UPDATE submissions SET failure_notice_due = FALSE
                    WHERE failure_notice_due AND status = 'failed'
-                   RETURNING id, assessment_id, grading_error, failed_at"""
+                   RETURNING id, assessment_id, grading_error, failed_at, auto_regrades"""
             ).fetchall()
             if rows:
                 conn.execute("UPDATE admin_notices SET notified_at = now() WHERE kind = 'grading_failed'")

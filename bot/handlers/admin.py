@@ -246,6 +246,9 @@ _NOT_POSSIBLE = {  # (command, state) -> why the command cannot act on an assess
     ("results", "draft"): "is still a draft, so nobody has answered it yet.",
     ("regrade", "draft"): "is still a draft, so it has no submissions to grade.",
     ("deadline", "closed"): "is closed, so its deadline can no longer be changed.",
+    ("resend", "draft"): "is still a draft, so it has not been sent to anyone. Publish it with "
+                         "📤 Send to all users under its preview.",
+    ("resend", "closed"): "is closed, so it is no longer sent to anyone.",
 }
 
 
@@ -297,7 +300,8 @@ async def _assessment_from_args(update: Update, context: ContextTypes.DEFAULT_TY
         nothing = {"close": "No assessment is open, so there is nothing to close.",
                    "regrade": "No grading has failed, so there is nothing to retry.",
                    "deadline": "No assessment is a draft or open, so there is nothing to set a deadline for.",
-                   "settings": "There are no assessments yet. Send a document or photo to create a draft."}[command]
+                   "settings": "There are no assessments yet. Send a document or photo to create a draft.",
+                   "resend": "No message of an open assessment failed to send, so there is nothing to resend."}[command]
         await guidance.reply(update, context, f"/{command} needs an assessment number. {nothing}", kind=STATE)
     return None
 
@@ -463,6 +467,50 @@ async def regrade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         report += (f"\n🔁 {busy} were being graded already (by another process or retry) and will be "
                    "sent when ready. No action needed.")
     await message.reply_text(report)
+
+
+async def resend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/resend <id>: send an open assessment again to the users whose message failed (Stage 8).
+
+    Those messages were not retried automatically because Telegram may have delivered them (a
+    timeout, or only part sent) or because they failed three times; sending them again is the
+    admin's decision. The database queues each failed message once (requeue_failed_deliveries).
+    """
+    if not await _require_admin(update, context):
+        return
+    assessment = await _assessment_from_args(update, context, "resend")
+    if assessment is None:
+        return
+    svc = services(context)
+    aid = assessment["id"]
+    users = svc.db.requeue_failed_deliveries(aid)
+    if not users:
+        due = assessment["deadline"]
+        if due and due <= datetime.now(timezone.utc):
+            why = (f"The deadline of #{aid} passed "
+                   f"({esc(deadlines.format_moment(due, svc.settings.tz))}), so it is no longer sent to anyone.")
+            await guidance.reply(update, context, why, [guidance.results_suggestion(aid)], kind=STATE)
+        elif svc.db.delivery_counts(aid).get("pending"):
+            await guidance.reply(update, context, f"Assessment #{aid} is still being sent. No action needed.",
+                                 kind=AUTOMATIC)
+        else:
+            await guidance.reply(update, context, f"Every message of #{aid} was sent or the user blocked the "
+                                 "bot, so there is nothing to resend.", guidance.resend_suggestions(svc.db), kind=STATE)
+        return
+    event(log, "delivery.resend", assessment=aid, users=len(users), admin=update.effective_user.id)
+    await update.effective_message.reply_text(
+        f"⏳ Sending #{aid} again to {plural(len(users), 'user')} it could not reach. Some of them may "
+        "already have it (their earlier send timed out), so they may receive it twice.")
+    await work.deliver(context.bot, svc, aid)
+    counts = svc.db.delivery_statuses(aid, users)
+    text = f"📤 Assessment #{aid}: sent again to {counts.get('sent', 0)} of {len(users)}."
+    if counts.get("blocked"):
+        text += f"\n{counts['blocked']} have blocked the bot."
+    if counts.get("failed"):
+        text += f"\n❌ {counts['failed']} still failed; /status shows the latest error."
+    if counts.get("pending"):
+        text += f"\n⏳ {counts['pending']} will be tried again shortly. No action needed."
+    await guidance.reply(update, context, text)
 
 
 async def users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -663,6 +711,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     failed = overview["failed_grading"]
     if failed:
         grading.append(f"❌ {sum(r['n'] for r in failed)} failed.")
+        auto = svc.db.auto_retry_pending(svc.settings.auto_regrade_attempts) if svc.settings.auto_regrade_attempts else 0
+        if auto:
+            grading.append(f"   🔁 {auto} of them retried automatically once the AI answers.")
         if overview["grading_error"]:
             grading.append(f"   Latest error: {esc(overview['grading_error'])}")
     if overview["results_unsent"]:
@@ -683,8 +734,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         sending.append(f"🚫 {overview['blocked_users']} user(s) have blocked the bot")
     lines += sending or ["✅ Nothing queued or failed"]
 
+    # Only what needs the admin: failed grading, and messages that could not be sent.
     body, markup = guidance.render(svc.settings, update.effective_user.id, "\n".join(lines),
-                                   guidance.regrade_suggestions(svc.db))  # only failed grading needs the admin
+                                   guidance.regrade_suggestions(svc.db) + guidance.resend_suggestions(svc.db))
     mode = "webhook" if svc.settings.webhook_url else "polling"
     body += f"\n\n<i>Answered by a process running for {_uptime(time.monotonic() - svc.started_at)} ({mode}).</i>"
     await message.edit_text(body, parse_mode=ParseMode.HTML, reply_markup=markup)
@@ -695,6 +747,7 @@ def register(application: Application) -> None:
     application.add_handler(CommandHandler("assessments", assessments, filters=PRIVATE))
     application.add_handler(CommandHandler("results", results, filters=PRIVATE))
     application.add_handler(CommandHandler("close", close, filters=PRIVATE))
+    application.add_handler(CommandHandler("resend", resend, filters=PRIVATE))
     application.add_handler(CommandHandler("deadline", deadline, filters=PRIVATE))
     application.add_handler(CommandHandler("settings", settings, filters=PRIVATE))
     application.add_handler(CommandHandler("regrade", regrade, filters=PRIVATE))

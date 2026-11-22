@@ -260,6 +260,7 @@ check that the report does not say the AI could not look at the pages.
 | User | *(just type)* | Chat with the AI, send answers, or say you are done to get a Submit button |
 | Admin | `/generate` | Reply to a message, file or photo to use it as material |
 | Admin | `/assessments`, `/results [id]`, `/close <id>`, `/regrade <id>`, `/users`, `/status` | Manage and review |
+| Admin | `/resend <id>` | Send an open assessment again to users whose message failed (Stage 8) |
 | Admin | `/deadline <id> [when]`, `/settings <id>` | Deadline and reminders; per-assessment reference answers and resubmission (Stage 7) |
 
 ## 5. Settings
@@ -284,6 +285,7 @@ Added by PR #3: `ALLOW_CHAT`, `CHAT_HISTORY_TURNS`. The rest were added by PR #2
 | `CHAT_HISTORY_TURNS` | 8 | Earlier exchanges the AI remembers per user; 0 for none |
 | `SHOW_CORRECT_ANSWERS` / `ALLOW_RESUBMISSION` | `true` / `false` | Defaults; `/settings <id>` overrides them per assessment (Stage 7) |
 | `TIMEZONE` | `UTC` | Time zone deadlines are typed and shown in (Stage 7) |
+| `AUTO_REGRADE_ATTEMPTS` | 3 | Times the bot retries failed grading by itself once the AI answers; 0 for none (Stage 8) |
 | `REMINDER_HOURS` | 24 | Hours before a deadline to remind students who have not submitted; 0 for none (Stage 7) |
 
 ## 6. Dependencies

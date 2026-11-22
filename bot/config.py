@@ -76,6 +76,8 @@ class Settings:
     # before a deadline students who have not submitted are reminded (0: no reminders).
     timezone: str = "UTC"
     reminder_hours: int = 24
+    # Stage 8: how many times the bot retries failed grading by itself once the AI answers (0: never).
+    auto_regrade_attempts: int = 3
 
     def is_admin(self, user_id: int | None) -> bool:
         return user_id is not None and user_id in self.admin_ids
@@ -262,4 +264,5 @@ def load_settings(env_file: Path | None = None) -> Settings:
         log_format=log_format,
         timezone=tz_name,
         reminder_hours=_int("REMINDER_HOURS", 24, minimum=0),
+        auto_regrade_attempts=_int("AUTO_REGRADE_ATTEMPTS", 3, minimum=0),
     )

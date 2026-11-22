@@ -27,7 +27,7 @@ Also in scope, because they are the same check-then-act race: Discard and Regene
 Send, and `/close` racing with sending.
 
 Out of scope: health checks and clean shutdown (Stage 4), admin status/alerts (Stage 5), sending
-speed for large classes (Stage 8).
+speed for large classes (Stage 9).
 
 ## Expected outcome
 

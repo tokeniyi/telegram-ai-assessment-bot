@@ -77,6 +77,13 @@ def regrade_suggestions(db: Database, limit: int = 3) -> list[Suggestion]:
             for r in db.failed_grading_by_assessment()[:limit]]
 
 
+def resend_suggestions(db: Database, limit: int = 3) -> list[Suggestion]:
+    """`/resend <id>` for the open assessments whose messages really failed to send (Stage 8)."""
+    return [Suggestion("resend", (str(r["assessment_id"]),),
+                       why=f"Send #{r['assessment_id']} again to {plural(r['n'], 'user')} it could not reach")
+            for r in db.failed_deliveries_by_assessment()[:limit]]
+
+
 def results_suggestion(assessment_id: int, why: str = "See the scores") -> Suggestion:
     return Suggestion("results", (str(assessment_id),), why=why, button=f"📊 Results #{assessment_id}")
 
@@ -85,6 +92,8 @@ def assessment_choices(db: Database, command: str, limit: int = 3) -> list[Sugge
     """Ready-to-use examples of `/command <id>` with ids this command can act on right now."""
     if command == "regrade":
         return regrade_suggestions(db, limit)
+    if command == "resend":
+        return resend_suggestions(db, limit)
     states = {"close": ("published",), "results": ("published", "closed"), "deadline": ("draft", "published"),
               "settings": ("draft", "published", "closed")}[command]
     rows = [a for a in db.list_assessments() if a["status"] in states][:limit]

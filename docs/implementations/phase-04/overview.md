@@ -28,7 +28,7 @@ Also: the documentation status updates for Phase 03 (merged as PR #12), rolled i
 at the user's request.
 
 Out of scope: Railway service settings themselves (they are made in the Railway dashboard and are
-documented, not changed, by this repository); admin visibility (Stage 5); rate limits (Stage 8).
+documented, not changed, by this repository); admin visibility (Stage 5); rate limits (Stage 9).
 
 ## Expected outcome
 
