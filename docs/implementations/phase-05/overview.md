@@ -29,7 +29,7 @@ In scope (the three items of Stage 5 in the roadmap):
 
 Out of scope: retrying failed grading automatically once the AI is back (admins still run
 `/regrade`; see [summary.md](summary.md)); a command to resend failed assessment messages;
-per-user rate limits (Stage 8); deadlines and reminders (Stage 7).
+per-user rate limits (Stage 9); deadlines and reminders (Stage 7).
 
 ## Expected outcome
 

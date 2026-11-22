@@ -301,7 +301,7 @@ async def my_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     for row in rows:
         if row["status"] == "graded":
             result = f"{num(row['score'])}/{num(row['max_score'])} ({percent(row['score'], row['max_score'])})"
-        elif row["status"] == "failed":  # an administrator retries it; nothing for the student to do
+        elif row["status"] == "failed":  # retried by the bot or an administrator; nothing for the student to do
             result = "grading delayed; your answers are saved and the result will be sent to you"
         else:
             result = "being graded; the result will be sent to you"

@@ -13,6 +13,7 @@ are in [CLAUDE.md](../../CLAUDE.md).
 | 05 | Visibility for the admin | `claude/lucid-brahmagupta-dri4yd` | [#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14) | Merged | [overview](phase-05/overview.md) · [implementation](phase-05/implementation.md) · [issues](phase-05/issues-and-fixes.md) · [testing](phase-05/testing.md) · [summary](phase-05/summary.md) |
 | 06 | Command guidance | `claude/stage-6-command-guidance` | [#15](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/15) | Merged | [overview](phase-06/overview.md) · [implementation](phase-06/implementation.md) · [issues](phase-06/issues-and-fixes.md) · [testing](phase-06/testing.md) · [summary](phase-06/summary.md) |
 | 07 | Assessment features | `claude/stoic-babbage-iym3c3` | [#16](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/16) | Merged | [overview](phase-07/overview.md) · [implementation](phase-07/implementation.md) · [issues](phase-07/issues-and-fixes.md) · [testing](phase-07/testing.md) · [summary](phase-07/summary.md) |
+| 08 | Recovery without the admin | `claude/stoic-babbage-iym3c3` | not opened yet | In progress | [overview](phase-08/overview.md) · [implementation](phase-08/implementation.md) · [issues](phase-08/issues-and-fixes.md) · [testing](phase-08/testing.md) · [summary](phase-08/summary.md) |
 
 ## Before the staged roadmap
 

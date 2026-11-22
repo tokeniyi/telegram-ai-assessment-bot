@@ -1,12 +1,14 @@
 # Roadmap
 
-The planned order of work on the bot. Stages 1 to 7 are done. The
+The planned order of work on the bot. Stages 1 to 7 are done and Stage 8 is in progress. The
 stages after them are proposals and can be reordered. What was built in each stage, and how it was tested,
 is in [docs/implementations](docs/implementations/README.md).
 
 Stages 3 and 4 finish the reliability work begun in Stages 1 and 2, so they come first.
-Stages 5 to 8 are independent of each other. Stage 6 was added on 2026-11-22, at the user's request;
+Stages 5 to 9 are independent of each other. Stage 6 was added on 2026-11-22, at the user's request;
 the proposed stages after it were renumbered (Assessment features 6 → 7, Scale and limits 7 → 8).
+Stage 8 was added the same day, also at the user's request, from the outstanding issues of Phases
+05 and 06; Scale and limits became Stage 9.
 
 | Stage | Topic | Status |
 |---|---|---|
@@ -17,7 +19,8 @@ the proposed stages after it were renumbered (Assessment features 6 → 7, Scale
 | 5 | Visibility for the admin | ✅ Done ([#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14), [phase 05 docs](docs/implementations/phase-05/summary.md)) |
 | 6 | Command guidance | ✅ Done ([#15](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/15), [phase 06 docs](docs/implementations/phase-06/summary.md)) |
 | 7 | Assessment features | ✅ Done ([#16](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/16), [phase 07 docs](docs/implementations/phase-07/summary.md)) |
-| 8 | Scale and limits | Proposed |
+| 8 | Recovery without the admin | 🚧 In progress ([phase 08 docs](docs/implementations/phase-08/summary.md)) |
+| 9 | Scale and limits | Proposed |
 
 ---
 
@@ -92,10 +95,6 @@ plain words and what to do next; when it succeeds, it suggests the next step onl
 
 Details: [phase 06](docs/implementations/phase-06/summary.md).
 
----
-
-## Next
-
 ### Stage 7: Assessment features ([#16](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/16))
 
 Product work, built on the reliable sending and grading of Stages 3 to 5.
@@ -112,9 +111,27 @@ Details: [phase 07](docs/implementations/phase-07/summary.md).
 
 ---
 
+## Next
+
+### Stage 8: Recovery without the admin
+
+Two gaps left by Phases 05 and 06, where something failed and nothing happened until an admin acted.
+
+- `/resend <id>`: send an open assessment again to the users whose message failed (timed out, sent
+  in part, or failed 3 times). Suggested by the publish report and `/status`; typed, never a button,
+  because a student whose send timed out may get a second copy.
+- Failed grading is retried by the bot itself once the AI provider answers again, up to
+  `AUTO_REGRADE_ATTEMPTS` (3) times per submission, 5 minutes after the failure and doubling. The
+  student gets the result; the admins get one batched "retried automatically" message. `/regrade`
+  stays for manual retries.
+
+Details: [phase 08](docs/implementations/phase-08/summary.md).
+
+---
+
 ## Proposed
 
-### Stage 8: Scale and limits
+### Stage 9: Scale and limits
 
 Protects the free AI tier and the server's memory as the number of users grows.
 

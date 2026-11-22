@@ -78,7 +78,7 @@ keeps `httpx` at WARNING, because its URLs contain the bot token.
 ## Architecture and design decisions
 
 - **Outages are detected from real requests.** The bot does not poll the provider in the
-  background. That would cost requests on a rate-limited free tier (Stage 8's concern), and a
+  background. That would cost requests on a rate-limited free tier (Stage 9's concern), and a
   model list answering does not prove completions work. The cost: recovery is noticed only when
   the next real request succeeds.
 - **"Down" means unreachable, not wrong.** Only `AIUnavailable` counts. Bad replies come from the

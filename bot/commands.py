@@ -98,6 +98,10 @@ COMMANDS: dict[str, Command] = {c.name: c for c in (
             example="/generate 8 questions, easy", invocations=("reply",)),
     Command("close", "Stop accepting answers for an assessment", role=ADMIN,
             args=(Arg("id", ASSESSMENT, example="3", states=("published",)),), example="/close 3"),
+    # Stage 8. Typed only: a student whose earlier send timed out may receive a second copy, so
+    # resending is a decision, not a tap (the database still stops a double /resend sending twice).
+    Command("resend", "Send an assessment again to users it could not reach", role=ADMIN,
+            args=(Arg("id", ASSESSMENT, example="3", states=("published",)),), example="/resend 3"),
     # Stage 7. /deadline changes an assessment, so it is typed, never run from a button.
     Command("deadline", "Set when an assessment closes", role=ADMIN,
             args=(Arg("id", ASSESSMENT, example="3", states=("draft", "published")),
