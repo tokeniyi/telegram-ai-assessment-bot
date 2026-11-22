@@ -1,6 +1,6 @@
 # Roadmap
 
-The planned order of work on the bot. Stages 1 to 7 are done and Stage 8 is in progress. The
+The planned order of work on the bot. Stages 1 to 7 are done and Stage 8 is in review. The
 stages after them are proposals and can be reordered. What was built in each stage, and how it was tested,
 is in [docs/implementations](docs/implementations/README.md).
 
@@ -19,7 +19,7 @@ Stage 8 was added the same day, also at the user's request, from the outstanding
 | 5 | Visibility for the admin | ✅ Done ([#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14), [phase 05 docs](docs/implementations/phase-05/summary.md)) |
 | 6 | Command guidance | ✅ Done ([#15](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/15), [phase 06 docs](docs/implementations/phase-06/summary.md)) |
 | 7 | Assessment features | ✅ Done ([#16](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/16), [phase 07 docs](docs/implementations/phase-07/summary.md)) |
-| 8 | Recovery without the admin | 🚧 In progress ([phase 08 docs](docs/implementations/phase-08/summary.md)) |
+| 8 | Recovery without the admin | 🔍 In review ([#17](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/17), [phase 08 docs](docs/implementations/phase-08/summary.md)) |
 | 9 | Scale and limits | Proposed |
 
 ---
@@ -113,7 +113,7 @@ Details: [phase 07](docs/implementations/phase-07/summary.md).
 
 ## Next
 
-### Stage 8: Recovery without the admin
+### Stage 8: Recovery without the admin ([#17](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/17))
 
 Two gaps left by Phases 05 and 06, where something failed and nothing happened until an admin acted.
 

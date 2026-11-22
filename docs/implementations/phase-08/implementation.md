@@ -4,8 +4,8 @@
 |---|---|
 | Roadmap stage | Stage 8 in [ROADMAP.md](../../../ROADMAP.md) |
 | Branch | `claude/stoic-babbage-iym3c3` (restarted from `main` after PR #16 was merged) |
-| Pull request | not opened yet |
-| Status | In progress |
+| Pull request | [#17](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/17) |
+| Status | In review |
 
 ## Features implemented
 
