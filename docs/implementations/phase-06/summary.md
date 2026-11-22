@@ -4,8 +4,8 @@
 |---|---|
 | Roadmap stage | Stage 6 in [ROADMAP.md](../../../ROADMAP.md) |
 | Branch | `claude/stage-6-command-guidance` (stacked on `claude/lucid-brahmagupta-dri4yd`, PR #14) |
-| Pull request | not opened yet |
-| Status | In progress |
+| Pull request | [#15](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/15) (base `main`; merge #14 first) |
+| Status | In review |
 
 ## Accomplished
 
@@ -50,8 +50,8 @@
 
 ## Final status
 
-Implemented and tested; PR not opened yet.
+Implemented and tested; PR #15 open for review (after PR #14).
 
 ## Pull request
 
-Not opened yet.
+[#15](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/15)
