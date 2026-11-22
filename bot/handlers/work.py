@@ -27,11 +27,12 @@ import logging
 import time
 from typing import Any
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, RetryAfter, TelegramError, TimedOut
 from telegram.ext import Application
 
+from .. import guidance
 from ..ai import AIError
 from ..alerts import report_grading_failures
 from ..logs import event
@@ -122,15 +123,25 @@ async def deliver(bot: Bot, svc: Services, assessment_id: int | None = None) -> 
 
 
 def delivery_report(assessment_id: int, counts: dict[str, int]) -> str:
+    """The publisher's report (HTML); its button is delivery_markup."""
     sent = counts.get("sent", 0)
     report = f"📤 Assessment #{assessment_id} sent to {sent} user{'s' if sent != 1 else ''}."
     if counts.get("blocked"):
         report += f"\n{counts['blocked']} blocked the bot and were skipped."
     if counts.get("failed"):
-        report += f"\n{counts['failed']} could not be reached (see the log)."
+        report += f"\n{counts['failed']} could not be reached (/status lists them)."
     if counts.get("cancelled"):
         report += f"\n{counts['cancelled']} were not sent because the assessment was closed."
-    return report + f"\nUse /results {assessment_id} to follow the scores."
+    if not sent:  # nobody received it: there will be no scores to follow
+        return report + "\nUsers receive assessments once they have sent /start to the bot."
+    return report + "\n👉 " + guidance.results_suggestion(assessment_id, "Follow the scores").html()
+
+
+def delivery_markup(assessment_id: int, counts: dict[str, int]):
+    if not counts.get("sent"):
+        return None
+    suggestion = guidance.results_suggestion(assessment_id)
+    return InlineKeyboardMarkup([[InlineKeyboardButton(suggestion.button, callback_data=suggestion.callback_data)]])
 
 
 async def report_deliveries(bot: Bot, svc: Services, assessment_id: int | None = None) -> None:
@@ -142,7 +153,8 @@ async def report_deliveries(bot: Bot, svc: Services, assessment_id: int | None =
               blocked=counts.get("blocked", 0), failed=counts.get("failed", 0),
               cancelled=counts.get("cancelled", 0))
         try:
-            await bot.send_message(admin_id, delivery_report(row["id"], row["counts"]))
+            await bot.send_message(admin_id, delivery_report(row["id"], row["counts"]), parse_mode=ParseMode.HTML,
+                                   reply_markup=delivery_markup(row["id"], row["counts"]))
         except TelegramError as exc:
             log.warning("Could not report delivery of assessment %s to %s: %s", row["id"], admin_id, exc)
 
@@ -184,8 +196,14 @@ async def send_result(bot: Bot, svc: Services, submission: dict[str, Any], block
     that may pass, recover_grading sends it once more after RESULT_GRACE seconds.
     """
     fields = dict(submission=submission["id"], user=submission["user_id"])
+    # The student's next step, only if there is one: other assessments still to answer.
+    nexts = guidance.student_next_steps(svc.db, svc.settings, submission["user_id"], exclude=submission["assessment_id"])
+    markup = None
+    if nexts:
+        footer, markup = guidance.render(svc.settings, submission["user_id"], "", nexts)
+        blocks = [*blocks, footer.strip()]
     try:
-        await send_blocks(bot, submission["user_id"], blocks)
+        await send_blocks(bot, submission["user_id"], blocks, reply_markup=markup)
     except Forbidden:
         svc.db.set_user_active(submission["user_id"], False)
         svc.db.mark_result_sent(submission["id"])  # blocked: there is nobody to send it to

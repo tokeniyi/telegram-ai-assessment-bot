@@ -22,6 +22,7 @@ from telegram import Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
+from .. import guidance
 from ..ai import AIError
 from ..utils import esc, num, send_blocks, services
 from . import student
@@ -60,6 +61,8 @@ def build_context(context: ContextTypes.DEFAULT_TYPE, user_id: int, assessment: 
     else:
         lines.append("No assessment is open for this student right now.")
 
+    # The only commands the model may mention: the ones this user can actually use (bot/commands.py).
+    lines.append("Commands this user can use: " + guidance.commands_for_ai(svc.settings, user_id))
     if svc.settings.is_admin(user_id):
         lines.append("This user is an administrator. They create assessments by sending a PDF, DOCX or TXT "
                      "file or photos of notes (a caption steers the questions), or by replying /generate to "

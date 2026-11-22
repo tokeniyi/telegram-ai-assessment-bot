@@ -21,8 +21,11 @@ from typing import TYPE_CHECKING, Any
 
 from telegram import Bot
 
+from . import guidance
 from .ai import AIUnavailable
+from .commands import Suggestion
 from .logs import event
+from .utils import esc
 
 if TYPE_CHECKING:
     from .utils import Services
@@ -33,10 +36,12 @@ AI_DOWN_AFTER = 3              # requests in a row that could not be made before
 GRADING_NOTICE_INTERVAL = 900  # seconds between two notices about failed grading
 
 
-async def notify_admins(bot: Bot, svc: Services, text: str) -> None:
+async def notify_admins(bot: Bot, svc: Services, text: str, suggestions: list[Suggestion] = ()) -> None:
+    """Send `text` (HTML) to every admin, with the suggested next steps and their buttons."""
     for admin_id in svc.settings.admin_ids:
+        body, markup = guidance.render(svc.settings, admin_id, text, suggestions)
         try:
-            await bot.send_message(admin_id, text)
+            await bot.send_message(admin_id, body, parse_mode="HTML", reply_markup=markup)
         except Exception:  # an admin who never started the bot cannot be messaged
             log.debug("Could not notify admin %s", admin_id)
 
@@ -50,31 +55,25 @@ def clock(moment: datetime | None) -> str:
     return moment.strftime("%H:%M UTC" if same_day else "%d %b %H:%M UTC")
 
 
-def regrade_hint(per_assessment: list[dict[str, Any]]) -> str:
-    """'Run /regrade 3 (2) and /regrade 5 (1) to retry.' from rows of (assessment_id, n)."""
-    parts = [f"/regrade {r['assessment_id']}" + (f" ({r['n']})" if len(per_assessment) > 1 else "")
-             for r in per_assessment]
-    return "Run " + ", ".join(parts) + " to retry."
-
-
-def grading_failure_notice(rows: list[dict[str, Any]]) -> str:
-    if len(rows) == 1:
-        row = rows[0]
-        return (f"⚠️ Grading failed for a submission to assessment #{row['assessment_id']}: "
-                f"{row['grading_error'] or 'unknown error'}\nRun /regrade {row['assessment_id']} to retry.")
+def grading_failure_notice(rows: list[dict[str, Any]]) -> tuple[str, list[Suggestion]]:
+    """The notice (HTML) and a /regrade suggestion for each assessment in it."""
     counts: dict[int, int] = {}
     for row in rows:
         counts[row["assessment_id"]] = counts.get(row["assessment_id"], 0) + 1
-    per_assessment = [{"assessment_id": a, "n": n} for a, n in sorted(counts.items())]
+    retry = [Suggestion("regrade", (str(aid),), why="Retry", button=f"🔁 Retry grading #{aid}")
+             for aid in sorted(counts)][:guidance.MAX_BUTTONS]
+    if len(rows) == 1:
+        row = rows[0]
+        return (f"⚠️ Grading failed for a submission to assessment #{row['assessment_id']}: "
+                f"{esc(row['grading_error'] or 'unknown error')}\nThe student's answers are saved."), retry
     lines = [f"⚠️ Grading failed for {len(rows)} submissions:"]
-    lines += [f"• assessment #{r['assessment_id']}: {r['n']}" for r in per_assessment]
+    lines += [f"• assessment #{aid}: {n}" for aid, n in sorted(counts.items())]
     latest = rows[-1]["grading_error"]
     if latest:
-        lines.append(f"Latest error: {latest}")
-    lines.append(regrade_hint(per_assessment))
+        lines.append(f"Latest error: {esc(latest)}")
     lines.append(f"More failures are reported at most every {GRADING_NOTICE_INTERVAL // 60} minutes; "
                  "/status shows the current state.")
-    return "\n".join(lines)
+    return "\n".join(lines), retry
 
 
 async def report_grading_failures(bot: Bot, svc: Services, force: bool = False) -> int:
@@ -88,7 +87,7 @@ async def report_grading_failures(bot: Bot, svc: Services, force: bool = False) 
     if rows:
         event(log, "alert.grading_failed", logging.WARNING, failures=len(rows),
               assessments=",".join(sorted({str(r["assessment_id"]) for r in rows})))
-        await notify_admins(bot, svc, grading_failure_notice(rows))
+        await notify_admins(bot, svc, *grading_failure_notice(rows))
     return len(rows)
 
 
@@ -108,12 +107,13 @@ class AIMonitor:
             return
         event(log, "alert.ai_down", logging.ERROR, failures=alert["consecutive_failures"],
               since=alert["failing_since"], error=alert["last_error"])
+        # No /regrade here: retrying cannot work until the provider answers again.
         await notify_admins(self.bot, self.svc, (
             f"🚨 The AI provider is not answering: {alert['consecutive_failures']} requests in a row "
-            f"failed since {clock(alert['failing_since'])}.\nLatest error: {alert['last_error']}\n\n"
-            "Students' answers are saved; grading that fails waits for /regrade. "
-            "You will get a message when the provider answers again. /status shows the details."
-        ))
+            f"failed since {clock(alert['failing_since'])}.\nLatest error: {esc(alert['last_error'])}\n\n"
+            "Students' answers are saved; grading that fails waits to be retried. "
+            "You will get a message when the provider answers again, with the grading to retry."
+        ), [Suggestion("status", why="Details", button="🩺 Status")])
 
     async def ai_succeeded(self) -> None:
         try:
@@ -131,8 +131,9 @@ class AIMonitor:
         except Exception:
             log.exception("Could not list failed grading")
             failed = []
+        retry = []
         if failed:
             total = sum(r["n"] for r in failed)
-            text += (f"\n{total} submission{'s are' if total != 1 else ' is'} waiting to be graded. "
-                     f"{regrade_hint(failed)}")
-        await notify_admins(self.bot, self.svc, text)
+            text += f"\n{total} submission{'s are' if total != 1 else ' is'} waiting to be graded."
+            retry = guidance.regrade_suggestions(self.svc.db)
+        await notify_admins(self.bot, self.svc, text, retry)

@@ -34,7 +34,7 @@
 - **Log with `event(log, "area.what", level, **fields)`**: ids, counts, timings and errors only,
   never answer or document text. Event names are a contract for log searches; renaming one
   breaks saved Railway filters.
-- **No background probing of the AI provider** (free-tier limits; see Stage 7). Recovery is
+- **No background probing of the AI provider** (free-tier limits; see Stage 8). Recovery is
   noticed on the next real request.
 
 ## Outstanding issues

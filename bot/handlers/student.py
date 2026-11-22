@@ -18,7 +18,9 @@ from telegram.ext import (
 )
 
 from ..ai import AIError
+from .. import guidance
 from ..alerts import report_grading_failures
+from ..commands import Suggestion
 from ..utils import esc, num, percent, question_blocks, send_blocks, services, total_points
 from . import explain, work
 from .reading import echo_block, is_image, read_upload
@@ -64,7 +66,8 @@ async def add_to_draft(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
     svc = services(context)
     assessment = target_assessment(context, user.id)
     if assessment is None:
-        hint = "📭 No assessments are waiting for your answers right now. Check /pending later."
+        hint = ("📭 No assessments are waiting for your answers right now. "
+                "I'll send the next one here as soon as it is published.")
         if svc.settings.is_admin(user.id):
             hint += " Send a PDF, DOCX or TXT file, or a photo, to create one."
         await message.reply_text(hint)
@@ -192,7 +195,8 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     if outcome == "closed":
         await query.answer()
-        await query.edit_message_text("This assessment is closed or you have already submitted it.")
+        text, markup = _not_open(svc, user.id, assessment_id, discarded=True)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
 
     context.user_data["grading"] = True
@@ -212,11 +216,29 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data["grading"] = False
 
 
+def _not_open(svc, user_id: int, assessment_id: int, discarded: bool):
+    """Why an assessment no longer takes this user's answers, and what they can do instead."""
+    assessment = svc.db.get_assessment(assessment_id)
+    if assessment is None or assessment["status"] != "published":
+        text = "This assessment has been closed, so it no longer accepts answers."
+    else:
+        text = "You have already submitted this assessment, and it can be submitted only once."
+    if discarded:
+        text += " The answers you had not submitted were discarded."
+    nexts = guidance.student_next_steps(svc.db, svc.settings, user_id, exclude=assessment_id)
+    if guidance.has_results(svc.db, user_id):
+        nexts.append(Suggestion("myresults", why="Your scores", button="📊 My results"))
+    return guidance.render(svc.settings, user_id, text, nexts, kind=guidance.STATE)
+
+
 # ── commands ─────────────────────────────────────────────────────────────
 async def pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     open_ = open_assessments(context, update.effective_user.id)
     if not open_:
-        await update.effective_message.reply_text("📭 You're all caught up! No assessments are waiting for your answers right now.")
+        svc = services(context)
+        nexts = [Suggestion("myresults", why="Your scores so far")] if guidance.has_results(svc.db, update.effective_user.id) else []
+        await guidance.reply(update, context, "📭 You're all caught up! No assessments are waiting for your "
+                             "answers right now.", nexts)
         return
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"#{a['id']} · {a['title']}"[:60], callback_data=f"show:{a['id']}")]
@@ -234,7 +256,8 @@ async def on_show_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     open_ = {a["id"]: a for a in open_assessments(context, user.id)}
     await query.answer()
     if assessment_id not in open_:
-        await query.edit_message_text("That assessment is closed or you have already submitted it.")
+        text, markup = _not_open(services(context), user.id, assessment_id, discarded=False)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
     db = services(context).db
     kept = db.choose_assessment(user.id, assessment_id)
@@ -249,18 +272,24 @@ async def on_show_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def my_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    rows = services(context).db.user_submissions(update.effective_user.id)
+    svc = services(context)
+    user_id = update.effective_user.id
+    rows = svc.db.user_submissions(user_id)
+    nexts = guidance.student_next_steps(svc.db, svc.settings, user_id)
     if not rows:
-        await update.effective_message.reply_text("📊 No results yet. After submitting an assessment, your scores will appear here.")
+        await guidance.reply(update, context, "📊 No results yet. After submitting an assessment, your "
+                             "scores will appear here.", nexts)
         return
     lines = ["<b>Your results</b>"]
     for row in rows:
         if row["status"] == "graded":
             result = f"{num(row['score'])}/{num(row['max_score'])} ({percent(row['score'], row['max_score'])})"
+        elif row["status"] == "failed":  # an administrator retries it; nothing for the student to do
+            result = "grading delayed; your answers are saved and the result will be sent to you"
         else:
-            result = "waiting to be graded"
+            result = "being graded; the result will be sent to you"
         lines.append(f"• {esc(row['title'])} — {result}")
-    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await guidance.reply(update, context, "\n".join(lines), nexts)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

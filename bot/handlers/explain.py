@@ -8,7 +8,7 @@ from telegram import Message, Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, filters
 
-from ..ai import AIError
+from ..ai import AIError, AIUnavailable
 from ..utils import esc, send_blocks, services
 from .reading import read_upload
 
@@ -81,7 +81,11 @@ async def _explain(message: Message, context: ContextTypes.DEFAULT_TYPE, materia
         explanation = await svc.ai.explain(material[:MAX_EXPLAIN_CHARS], question)
     except AIError as exc:
         log.error("Explanation failed: %s", exc)
-        await context.bot.send_message(chat_id, "⚠️ I couldn't explain that just now. Please try again later.")
+        if isinstance(exc, AIUnavailable):  # temporary: the same request may work later
+            text = "⏳ I couldn't explain that just now: my AI is not answering. Please try again in a few minutes."
+        else:  # the AI answered, but not usefully: asking differently helps more than waiting
+            text = "⚠️ I couldn't explain that just now. Try again, or ask about one part at a time."
+        await context.bot.send_message(chat_id, text)
         return
     finally:
         context.user_data["explaining"] = False

@@ -1,11 +1,12 @@
 # Roadmap
 
-The planned order of work on the bot. Stages 1 to 4 are done and Stage 5 is in review. The stages
-after it are proposals and can be reordered. What was built in each stage, and how it was tested,
+The planned order of work on the bot. Stages 1 to 4 are done and Stages 5 and 6 are in review. The
+stages after them are proposals and can be reordered. What was built in each stage, and how it was tested,
 is in [docs/implementations](docs/implementations/README.md).
 
 Stages 3 and 4 finish the reliability work begun in Stages 1 and 2, so they come first.
-Stages 5 to 7 are independent of each other.
+Stages 5 to 8 are independent of each other. Stage 6 was added on 2026-11-22, at the user's request;
+the proposed stages after it were renumbered (Assessment features 6 → 7, Scale and limits 7 → 8).
 
 | Stage | Topic | Status |
 |---|---|---|
@@ -14,8 +15,9 @@ Stages 5 to 7 are independent of each other.
 | 3 | Work that survives a restart | ✅ Done ([#12](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/12)) |
 | 4 | Safer deploys | ✅ Done ([#13](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/13)) |
 | 5 | Visibility for the admin | 🔍 In review ([#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14), [phase 05 docs](docs/implementations/phase-05/summary.md)) |
-| 6 | Assessment features | Proposed |
-| 7 | Scale and limits | Proposed |
+| 6 | Command guidance | 🔍 In review ([#15](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/15), [phase 06 docs](docs/implementations/phase-06/summary.md)) |
+| 7 | Assessment features | Proposed |
+| 8 | Scale and limits | Proposed |
 
 ---
 
@@ -80,11 +82,25 @@ Problems used to show up only in the server logs, or when a student complained.
 
 Details: [phase 05](docs/implementations/phase-05/summary.md).
 
+### Stage 6: Command guidance
+
+Users should not have to remember commands. When something fails, the bot says what went wrong in
+plain words and what to do next; when it succeeds, it suggests the next step only if there is one.
+
+- One command registry (`bot/commands.py`) for the menus, `/help`, "did you mean" and every
+  suggestion; tested against the handlers that are really registered.
+- Problems are told apart: wrong input, no permission, not possible in this state, a temporary
+  outage, or already being retried (no action needed).
+- Suggested commands carry real ids from the database, as tap-to-copy code, and as buttons for
+  safe commands. `/regrade` is suggested only for failed grading.
+
+Details: [phase 06](docs/implementations/phase-06/summary.md).
+
 ---
 
 ## Proposed
 
-### Stage 6: Assessment features
+### Stage 7: Assessment features
 
 Product work, safer to build once Stages 3 to 5 make sending and grading reliable.
 
@@ -94,7 +110,7 @@ Product work, safer to build once Stages 3 to 5 make sending and grading reliabl
   resubmit. Both are one setting for the whole bot today (`SHOW_CORRECT_ANSWERS`,
   `ALLOW_RESUBMISSION`).
 
-### Stage 7: Scale and limits
+### Stage 8: Scale and limits
 
 Protects the free AI tier and the server's memory as the number of users grows.
 

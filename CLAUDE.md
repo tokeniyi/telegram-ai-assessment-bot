@@ -12,6 +12,10 @@ Planned work is in [ROADMAP.md](ROADMAP.md); what was built in each phase is in
 - Run: `python main.py` (settings from `.env`, see `.env.example`).
 - Test: `python -m pytest -q`. The tests need PostgreSQL; set `TEST_DATABASE_URL`
   (CI uses `postgresql://postgres:postgres@localhost:5432/bot_test`). Each test gets its own schema.
+- Commands live in the registry `bot/commands.py`. A new command is added there (role, arguments,
+  example) as well as to its handler; menus, `/help` and suggestions follow, and
+  `tests/test_guidance.py` fails if the two disagree. Suggest commands only with
+  `commands.Suggestion` and real values from the database (`bot/guidance.py`).
 - Several bot processes can share one database (two versions run together during a Railway
   deploy). Anything that must happen once is decided by the database (a conditional `UPDATE …
   RETURNING`, a primary key, a lease), never by in-memory state.
