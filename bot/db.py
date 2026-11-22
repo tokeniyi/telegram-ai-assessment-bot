@@ -125,6 +125,25 @@ CREATE TABLE IF NOT EXISTS admin_notices (
     kind         TEXT PRIMARY KEY,
     notified_at  TIMESTAMPTZ NOT NULL
 );
+-- Stage 7: deadlines, reminders and per-assessment options. NULL options follow the bot-wide
+-- settings (SHOW_CORRECT_ANSWERS, ALLOW_RESUBMISSION), as every assessment did before.
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS deadline TIMESTAMPTZ;
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ;
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS reminders_queued_at TIMESTAMPTZ;
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS show_answers BOOLEAN;
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS allow_resubmission BOOLEAN;
+CREATE INDEX IF NOT EXISTS idx_assessments_deadline ON assessments(deadline)
+    WHERE status = 'published' AND deadline IS NOT NULL;
+-- Stage 7: one row per student to remind before a deadline. Written in the same transaction that
+-- marks the assessment's reminders as queued, and each row is taken by one process (at most once).
+CREATE TABLE IF NOT EXISTS reminders (
+    assessment_id  BIGINT NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+    user_id        BIGINT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'pending',  -- pending | sent | skipped | blocked | failed
+    sent_at        TIMESTAMPTZ,
+    last_error     TEXT,
+    PRIMARY KEY (assessment_id, user_id)
+);
 CREATE INDEX IF NOT EXISTS idx_submissions_pending ON submissions(id) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_questions_assessment ON questions(assessment_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_lookup ON submissions(assessment_id, user_id);
@@ -133,6 +152,10 @@ CREATE INDEX IF NOT EXISTS idx_draft_answers_user ON draft_answers(user_id, id);
 
 
 SCHEMA_LOCK = 0x7465_6C65  # any constant shared by every bot process
+# An assessment takes answers while it is published and its deadline (if any) has not passed. The
+# deadline is checked here, not only when the background work closes it, so that answers stop at
+# the deadline itself rather than up to one work interval later.
+OPEN = "(a.status = 'published' AND (a.deadline IS NULL OR a.deadline > now()))"
 
 
 def _now() -> str:
@@ -295,13 +318,14 @@ class Database:
         """Publish a draft and queue it for every active user, exactly once.
 
         Returns the number of users queued, or None if the assessment is not a draft any more
-        (a second tap, a copy from another process, or it was discarded). The status change and
+        (a second tap, a copy from another process, or it was discarded) or its deadline has passed. The status change and
         the queue are written in one transaction, so a restart cannot leave one without the other.
         """
         with self._pool.connection() as conn:
             published = conn.execute(
                 """UPDATE assessments SET status = 'published', published_at = %s, published_by = %s
-                   WHERE id = %s AND status = 'draft' RETURNING id""",
+                   WHERE id = %s AND status = 'draft' AND (deadline IS NULL OR deadline > now())
+                   RETURNING id""",
                 (_now(), published_by, assessment_id),
             ).fetchone()
             if published is None:
@@ -318,7 +342,8 @@ class Database:
         if it was not open."""
         with self._pool.connection() as conn:
             closed = conn.execute(
-                "UPDATE assessments SET status = 'closed' WHERE id = %s AND status = 'published' RETURNING id",
+                "UPDATE assessments SET status = 'closed', closed_at = now() "
+                "WHERE id = %s AND status = 'published' RETURNING id",
                 (assessment_id,),
             ).fetchone()
             if closed is None:
@@ -329,6 +354,124 @@ class Database:
                 (assessment_id,),
             )
             return True
+
+    # ── deadlines and per-assessment options (Stage 7) ───────────────────
+    def set_deadline(self, assessment_id: int, deadline: datetime | None) -> dict[str, Any] | None:
+        """Set or remove the deadline of a draft or an open assessment. Returns the updated row,
+        or None (nothing changed) if it is closed or its deadline has already passed.
+
+        Reminders already queued or sent for the old deadline are forgotten, so students who have
+        still not submitted are reminded again before the new one.
+        """
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"""UPDATE assessments a SET deadline = %s, reminders_queued_at = NULL
+                    WHERE a.id = %s AND (a.status = 'draft' OR {OPEN}) RETURNING a.*""",
+                (deadline, assessment_id),
+            ).fetchone()
+            if row is not None:
+                conn.execute("DELETE FROM reminders WHERE assessment_id = %s", (assessment_id,))
+            return row
+
+    OPTIONS = ("show_answers", "allow_resubmission")
+
+    def set_option(self, assessment_id: int, option: str, value: bool | None) -> dict[str, Any] | None:
+        """Set one per-assessment option (None: follow the bot-wide setting). Returns the row."""
+        if option not in self.OPTIONS:
+            raise ValueError(f"unknown option {option!r}")
+        return self._one(f"UPDATE assessments SET {option} = %s WHERE id = %s RETURNING *",
+                         (value, assessment_id))
+
+    def close_due_assessments(self) -> list[dict[str, Any]]:
+        """Close every open assessment whose deadline has passed. Each is returned once, to one
+        caller (across processes), with how many students were sent it and how many submitted, so
+        that exactly one process tells its publisher. Unsent messages are cancelled, as by /close."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """UPDATE assessments SET status = 'closed', closed_at = now()
+                   WHERE status = 'published' AND deadline IS NOT NULL AND deadline <= now()
+                   RETURNING id, title, deadline, published_by, created_by"""
+            ).fetchall()
+            for row in rows:
+                conn.execute("UPDATE deliveries SET status = 'cancelled', claimed_until = NULL "
+                             "WHERE assessment_id = %s AND status = 'pending'", (row["id"],))
+                conn.execute("UPDATE reminders SET status = 'skipped' "
+                             "WHERE assessment_id = %s AND status = 'pending'", (row["id"],))
+                counts = conn.execute(
+                    """SELECT (SELECT COUNT(*) FROM deliveries WHERE assessment_id = %s AND status = 'sent') AS sent,
+                              (SELECT COUNT(DISTINCT user_id) FROM submissions WHERE assessment_id = %s) AS submitted""",
+                    (row["id"], row["id"]),
+                ).fetchone()
+                row.update(counts)
+        return sorted(rows, key=lambda r: r["id"])
+
+    # ── reminders before a deadline (Stage 7) ────────────────────────────
+    def queue_due_reminders(self, before_seconds: float) -> list[int]:
+        """Queue reminders for open assessments whose deadline is less than `before_seconds` away.
+
+        Each assessment is queued once (until its deadline changes), by one process, in one
+        transaction with its rows: one per student who was sent it, can still be reached and has
+        not submitted. An assessment published when its deadline was already that close is not
+        queued: its students were just sent it, deadline included. Returns the assessments queued.
+        """
+        with self._pool.connection() as conn:
+            ids = [r["id"] for r in conn.execute(
+                f"""UPDATE assessments a SET reminders_queued_at = now()
+                    WHERE {OPEN} AND a.deadline IS NOT NULL AND a.reminders_queued_at IS NULL
+                      AND a.deadline - make_interval(secs => %s) <= now()
+                      AND a.published_at::timestamptz < a.deadline - make_interval(secs => %s)
+                    RETURNING a.id""",
+                (before_seconds, before_seconds),
+            ).fetchall()]
+            if ids:
+                conn.execute(
+                    """INSERT INTO reminders (assessment_id, user_id)
+                       SELECT d.assessment_id, d.user_id FROM deliveries d
+                       JOIN users u ON u.user_id = d.user_id AND u.is_active
+                       WHERE d.assessment_id = ANY(%s) AND d.status = 'sent'
+                         AND NOT EXISTS (SELECT 1 FROM submissions s
+                                         WHERE s.assessment_id = d.assessment_id AND s.user_id = d.user_id)
+                       ON CONFLICT DO NOTHING""",
+                    (ids,),
+                )
+            return sorted(ids)
+
+    def claim_reminder(self) -> dict[str, Any] | None:
+        """Take the next reminder to send, marking it sent first, so that it is sent at most once
+        even with several processes (a process stopping right after this loses that one reminder).
+
+        Reminders for students who have submitted meanwhile, or for an assessment no longer open,
+        are marked 'skipped' instead. Returns the reminder with its assessment's title, deadline and
+        how many answer messages the student has saved for it.
+        """
+        with self._pool.connection() as conn:
+            conn.execute(
+                f"""UPDATE reminders r SET status = 'skipped' FROM assessments a
+                    WHERE a.id = r.assessment_id AND r.status = 'pending'
+                      AND (NOT {OPEN} OR EXISTS (SELECT 1 FROM submissions s
+                                                 WHERE s.assessment_id = r.assessment_id AND s.user_id = r.user_id))"""
+            )
+            return conn.execute(
+                """UPDATE reminders r SET status = 'sent', sent_at = now()
+                   FROM (SELECT assessment_id, user_id FROM reminders WHERE status = 'pending'
+                         ORDER BY assessment_id, user_id LIMIT 1 FOR UPDATE SKIP LOCKED) next,
+                        assessments a
+                   WHERE r.assessment_id = next.assessment_id AND r.user_id = next.user_id
+                     AND a.id = r.assessment_id
+                   RETURNING r.assessment_id, r.user_id, a.title, a.deadline,
+                             (SELECT COUNT(*) FROM draft_answers x
+                              WHERE x.user_id = r.user_id AND x.assessment_id = r.assessment_id) AS saved"""
+            ).fetchone()
+
+    def finish_reminder(self, assessment_id: int, user_id: int, status: str, error: str | None = None) -> None:
+        """Record that a claimed reminder could not be sent: 'blocked' or 'failed'."""
+        self._run("UPDATE reminders SET status = %s, last_error = %s WHERE assessment_id = %s AND user_id = %s",
+                  (status, error, assessment_id, user_id))
+
+    def reminder_counts(self, assessment_id: int) -> dict[str, int]:
+        rows = self._all("SELECT status, COUNT(*) AS n FROM reminders WHERE assessment_id = %s GROUP BY status",
+                         (assessment_id,))
+        return {r["status"]: r["n"] for r in rows}
 
     # ── deliveries: the published assessment, sent to each user once ────
     def claim_delivery(self, lease_seconds: float, assessment_id: int | None = None) -> dict[str, Any] | None:
@@ -342,7 +485,7 @@ class Database:
             f"""UPDATE deliveries d SET attempts = d.attempts + 1,
                        claimed_until = now() + make_interval(secs => %s)
                 FROM (SELECT d.assessment_id, d.user_id FROM deliveries d
-                      JOIN assessments a ON a.id = d.assessment_id AND a.status = 'published'
+                      JOIN assessments a ON a.id = d.assessment_id AND {OPEN}
                       WHERE d.status = 'pending' AND (d.claimed_until IS NULL OR d.claimed_until < now()) {only}
                       ORDER BY d.assessment_id, d.user_id LIMIT 1
                       FOR UPDATE OF d SKIP LOCKED) next
@@ -410,7 +553,7 @@ class Database:
 
     def list_assessments(self, limit: int = 20) -> list[dict[str, Any]]:
         return self._all(
-            """SELECT a.id, a.title, a.status, a.created_at,
+            """SELECT a.id, a.title, a.status, a.created_at, a.deadline,
                       (SELECT COUNT(*) FROM questions q WHERE q.assessment_id = a.id) AS num_questions,
                       (SELECT COUNT(DISTINCT s.user_id) FROM submissions s WHERE s.assessment_id = a.id)
                           AS num_submitters
@@ -418,14 +561,16 @@ class Database:
             (limit,),
         )
 
-    def open_assessments_for(self, user_id: int, include_submitted: bool) -> list[dict[str, Any]]:
-        """Published assessments the user can still answer, newest first."""
-        sql = "SELECT a.* FROM assessments a WHERE a.status = 'published'"
-        params: tuple = ()
-        if not include_submitted:
-            sql += " AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.assessment_id = a.id AND s.user_id = %s)"
-            params = (user_id,)
-        return self._all(sql + " ORDER BY a.published_at DESC, a.id DESC", params)
+    def open_assessments_for(self, user_id: int, default_resubmission: bool) -> list[dict[str, Any]]:
+        """Assessments the user can still answer, newest first: open (OPEN), and not submitted by
+        them yet unless the assessment allows resubmission (its own option, else the default)."""
+        return self._all(
+            f"""SELECT a.* FROM assessments a WHERE {OPEN}
+                  AND (COALESCE(a.allow_resubmission, %s)
+                       OR NOT EXISTS (SELECT 1 FROM submissions s WHERE s.assessment_id = a.id AND s.user_id = %s))
+                ORDER BY a.published_at DESC, a.id DESC""",
+            (default_resubmission, user_id),
+        )
 
     # ── submissions ──────────────────────────────────────────────────────
     def create_submission(self, assessment_id: int, user_id: int, raw_text: str) -> int:
@@ -756,7 +901,9 @@ class Database:
 
         Returns ("submitted", submission_id), ("empty", None) when there is no draft for it
         (already submitted, discarded, or never written), or ("closed", None) when the assessment
-        no longer accepts this user's answers; the draft is then discarded. Checking, inserting
+        no longer accepts this user's answers (closed, its deadline passed, or already submitted
+        and it does not allow resubmission); the draft is then discarded. `allow_resubmission` is
+        the bot-wide default, used when the assessment has no option of its own. Checking, inserting
         the submission and deleting the draft happen in one transaction under the user's lock,
         so repeated or concurrent submits create at most one submission.
 
@@ -775,13 +922,16 @@ class Database:
                 return "empty", None
             parts = [r["text"] for r in sorted(claimed, key=lambda r: r["id"])]
             conn.execute("UPDATE user_sessions SET target_assessment_id = NULL WHERE user_id = %s", (user_id,))
-            assessment = conn.execute("SELECT status FROM assessments WHERE id = %s FOR SHARE",
-                                      (assessment_id,)).fetchone()
-            already = not allow_resubmission and conn.execute(
+            # FOR SHARE: closing the assessment (/close, or its deadline) waits for this transaction.
+            assessment = conn.execute(
+                f"SELECT {OPEN} AS open, COALESCE(a.allow_resubmission, %s) AS resubmit "
+                "FROM assessments a WHERE a.id = %s FOR SHARE",
+                (allow_resubmission, assessment_id)).fetchone()
+            already = assessment is not None and not assessment["resubmit"] and conn.execute(
                 "SELECT 1 FROM submissions WHERE assessment_id = %s AND user_id = %s LIMIT 1",
                 (assessment_id, user_id),
             ).fetchone() is not None
-            if assessment is None or assessment["status"] != "published" or already:
+            if assessment is None or not assessment["open"] or already:
                 return "closed", None
             submission_id = conn.execute(
                 """INSERT INTO submissions (assessment_id, user_id, raw_text, created_at,

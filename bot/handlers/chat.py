@@ -22,7 +22,7 @@ from telegram import Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
-from .. import guidance
+from .. import deadlines, guidance
 from ..ai import AIError
 from ..utils import esc, num, send_blocks, services
 from . import student
@@ -51,6 +51,8 @@ def build_context(context: ContextTypes.DEFAULT_TYPE, user_id: int, assessment: 
     if assessment:
         questions = svc.db.get_questions(assessment["id"])
         lines.append(f'Open assessment: "{assessment["title"]}". The student has not submitted it yet.')
+        if assessment.get("deadline"):
+            lines.append("Deadline: " + deadlines.describe(assessment["deadline"], svc.settings.tz))
         for q in questions:
             line = f"Q{q['position']} ({num(q['points'])} pt): {q['text']}"
             if q["options"]:
@@ -72,11 +74,12 @@ def build_context(context: ContextTypes.DEFAULT_TYPE, user_id: int, assessment: 
         last = graded[0]
         lines.append(f'Latest result: "{last["title"]}", {num(last["score"])}/{num(last["max_score"])} points.')
         questions = {q["position"]: q for q in svc.db.get_questions(last["assessment_id"])}
+        show_answers = svc.settings.shows_answers(svc.db.get_assessment(last["assessment_id"]) or {})
         for item in json.loads(last["details"] or "[]"):
             q = questions.get(item["number"], {})
             line = (f"  Q{item['number']} {q.get('text', '')} | student answered: {item['student_answer'] or '(nothing)'} "
                     f"| {num(item['awarded'])}/{num(item['max'])} | feedback: {item['feedback']}")
-            if svc.settings.show_correct_answers and q:
+            if show_answers and q:
                 line += f" | reference answer: {q['answer']}"
             lines.append(line)
         if last["feedback"]:

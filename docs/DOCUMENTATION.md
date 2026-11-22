@@ -259,7 +259,8 @@ check that the report does not say the AI could not look at the pages.
 | User | `/explain` | Explain a photo, file, replied message or question |
 | User | *(just type)* | Chat with the AI, send answers, or say you are done to get a Submit button |
 | Admin | `/generate` | Reply to a message, file or photo to use it as material |
-| Admin | `/assessments`, `/results [id]`, `/close <id>`, `/regrade <id>`, `/users` | Manage and review |
+| Admin | `/assessments`, `/results [id]`, `/close <id>`, `/regrade <id>`, `/users`, `/status` | Manage and review |
+| Admin | `/deadline <id> [when]`, `/settings <id>` | Deadline and reminders; per-assessment reference answers and resubmission (Stage 7) |
 
 ## 5. Settings
 
@@ -281,6 +282,9 @@ Added by PR #3: `ALLOW_CHAT`, `CHAT_HISTORY_TURNS`. The rest were added by PR #2
 | `ALLOW_EXPLAIN` | `true` | Enables `/explain` |
 | `ALLOW_CHAT` | `true` | `false`: no chat, every typed message is an answer (old behaviour) |
 | `CHAT_HISTORY_TURNS` | 8 | Earlier exchanges the AI remembers per user; 0 for none |
+| `SHOW_CORRECT_ANSWERS` / `ALLOW_RESUBMISSION` | `true` / `false` | Defaults; `/settings <id>` overrides them per assessment (Stage 7) |
+| `TIMEZONE` | `UTC` | Time zone deadlines are typed and shown in (Stage 7) |
+| `REMINDER_HOURS` | 24 | Hours before a deadline to remind students who have not submitted; 0 for none (Stage 7) |
 
 ## 6. Dependencies
 

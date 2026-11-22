@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
@@ -18,7 +19,7 @@ from telegram.ext import (
 )
 
 from ..ai import AIError
-from .. import guidance
+from .. import deadlines, guidance
 from ..alerts import report_grading_failures
 from ..commands import Suggestion
 from ..utils import esc, num, percent, question_blocks, send_blocks, services, total_points
@@ -34,7 +35,7 @@ MAX_DRAFT_CHARS = 30_000
 # ── which assessment is the user answering? ──────────────────────────────
 def open_assessments(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> list[dict[str, Any]]:
     svc = services(context)
-    return svc.db.open_assessments_for(user_id, include_submitted=svc.settings.allow_resubmission)
+    return svc.db.open_assessments_for(user_id, default_resubmission=svc.settings.allow_resubmission)
 
 
 def target_assessment(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict[str, Any] | None:
@@ -47,12 +48,19 @@ def target_assessment(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict[
     return open_[0] if open_ else None
 
 
-def assessment_blocks(assessment: dict[str, Any], questions: list[dict[str, Any]]) -> list[str]:
-    """The message users receive when an assessment is published."""
+def assessment_blocks(assessment: dict[str, Any], questions: list[dict[str, Any]], settings) -> list[str]:
+    """The message users receive when an assessment is published (and from /pending)."""
     header = (
         f"📝 <b>{esc(assessment['title'])}</b>\n"
         f"{len(questions)} questions · {num(total_points(questions))} points"
     )
+    if assessment.get("deadline"):
+        header += f"\n⏰ Deadline: <b>{esc(deadlines.describe(assessment['deadline'], settings.tz))}</b>"
+    if settings.allows_resubmission(assessment):
+        header += "\n🔁 You may submit more than once; your latest attempt counts."
+    else:
+        header += "\nYou can submit once."
+
     footer = (
         "✍️ <b>How to answer:</b> Send your answers as text, files, or photos. You can use any format "
         "(for example <code>1. B</code> then <code>2. your answer…</code>), then tap <b>✅ Submit</b> after sending your answers."
@@ -219,7 +227,11 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 def _not_open(svc, user_id: int, assessment_id: int, discarded: bool):
     """Why an assessment no longer takes this user's answers, and what they can do instead."""
     assessment = svc.db.get_assessment(assessment_id)
-    if assessment is None or assessment["status"] != "published":
+    deadline = assessment and assessment["deadline"]
+    if deadline and deadline <= datetime.now(timezone.utc) and assessment["status"] != "draft":
+        text = (f"The deadline for this assessment passed ({esc(deadlines.format_moment(deadline, svc.settings.tz))}), "
+                "so it no longer accepts answers.")
+    elif assessment is None or assessment["status"] != "published":
         text = "This assessment has been closed, so it no longer accepts answers."
     else:
         text = "You have already submitted this assessment, and it can be submitted only once."
@@ -240,9 +252,13 @@ async def pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await guidance.reply(update, context, "📭 You're all caught up! No assessments are waiting for your "
                              "answers right now.", nexts)
         return
+    tz = services(context).settings.tz
+
+    def label(a):  # the deadline goes first, so that a long title cannot cut it off
+        due = f"⏰ {a['deadline'].astimezone(tz):%d %b %H:%M} · " if a["deadline"] else ""
+        return f"{due}#{a['id']} · {a['title']}"[:60]
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"#{a['id']} · {a['title']}"[:60], callback_data=f"show:{a['id']}")]
-        for a in open_[:20]
+        [InlineKeyboardButton(label(a), callback_data=f"show:{a['id']}")] for a in open_[:20]
     ])
     await update.effective_message.reply_text(
         "📝 <b>Assessments to complete</b>\nChoose an assessment below to view its questions:", parse_mode=ParseMode.HTML, reply_markup=keyboard
@@ -261,7 +277,8 @@ async def on_show_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     db = services(context).db
     kept = db.choose_assessment(user.id, assessment_id)
-    await send_blocks(context.bot, user.id, assessment_blocks(open_[assessment_id], db.get_questions(assessment_id)))
+    await send_blocks(context.bot, user.id, assessment_blocks(open_[assessment_id], db.get_questions(assessment_id),
+                                                             services(context).settings))
     if kept:  # picking the same assessment again resumes it rather than wiping what was saved
         await context.bot.send_message(
             user.id,
@@ -305,7 +322,7 @@ def stored_result_blocks(svc, submission: dict[str, Any]) -> list[str]:
     questions = svc.db.get_questions(assessment["id"])
     return result_blocks(
         assessment, questions, json.loads(submission["details"]), submission["score"],
-        submission["max_score"], submission["feedback"] or "", svc.settings.show_correct_answers,
+        submission["max_score"], submission["feedback"] or "", svc.settings.shows_answers(assessment),
     )
 
 

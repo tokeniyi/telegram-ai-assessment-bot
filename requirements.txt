@@ -13,3 +13,4 @@ opencv-python-headless>=4.8
 numpy>=1.26
 Pillow>=10.1
 pypdfium2>=4.30                # renders PDF pages for OCR
+tzdata>=2024.1                 # time zones for TIMEZONE (deadlines), also where the OS has none
