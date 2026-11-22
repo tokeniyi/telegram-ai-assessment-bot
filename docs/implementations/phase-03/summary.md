@@ -45,7 +45,7 @@
   student could get two result messages). Avoid `/regrade` while the deploy is in progress.
 - **Failed sends are only visible in the log and the publisher's report.** An admin view of failed
   deliveries and stuck grading belongs to Stage 5 (`/status`).
-- **No pacing for large classes** beyond 50 ms between messages (Stage 7).
+- **No pacing for large classes** beyond 50 ms between messages (Stage 8).
 - Running these tests against a real Telegram bot and AI provider on Railway: **Not done** in this
   phase; recommended as a manual check after merging (publish to two accounts, redeploy mid-send).
 

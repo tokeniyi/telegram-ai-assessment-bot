@@ -103,7 +103,7 @@ async def test_status_shows_grading_and_sending_problems_from_every_process(make
     new = await make_harness()  # another process: everything comes from the database
     text = await status_text(new)
     assert "⏳ 1 being graded now" in text  # the crashed process's lease has not run out yet
-    assert "❌ 1 failed. Run /regrade 1 to retry." in text
+    assert "❌ 1 failed." in text and "Retry grading 1 submission to #1: <code>/regrade 1</code>" in text
     assert "Latest error: The AI returned a reply that could not be understood" in text
     assert "⏳ 1 message(s) still to send (#1: 1)" in text
     assert "❌ 1 could not be sent (#1: 1)" in text and "Latest error: Timed out" in text
@@ -245,7 +245,7 @@ async def test_grading_failures_are_reported_at_once_then_batched(harness):
     assert [h.db.get_submission(i)["status"] for i in range(1, 6)] == ["failed"] * 5
     assert len(notices(h)) == 1  # the first one at once, the same wording as before Stage 5
     assert notices(h)[0].startswith("⚠️ Grading failed for a submission to assessment #1: The AI returned")
-    assert "Run /regrade 1 to retry." in notices(h)[0]
+    assert "👉 Retry: <code>/regrade 1</code>" in notices(h)[0]
 
     svc = h.app.bot_data["services"]
     await work.run_once(h.app.bot, svc)
@@ -255,7 +255,7 @@ async def test_grading_failures_are_reported_at_once_then_batched(harness):
     await work.run_once(h.app.bot, svc)
     assert len(notices(h)) == 2
     assert notices(h)[1].startswith("⚠️ Grading failed for 4 submissions:")
-    assert "• assessment #1: 4" in notices(h)[1] and "/regrade 1" in notices(h)[1]
+    assert "• assessment #1: 4" in notices(h)[1] and "<code>/regrade 1</code>" in notices(h)[1]
 
     let_notice_interval_pass(h.db)
     await work.run_once(h.app.bot, svc)
@@ -297,7 +297,8 @@ async def test_during_an_outage_grading_failures_wait_for_the_back_message(harne
     await h.text(STUDENT_ID, "hello")  # any request that gets through
     back = notices(h)[-1]
     assert back.startswith("✅ The AI provider is answering again")
-    assert "5 submissions are waiting to be graded. Run /regrade 1 to retry." in back
+    assert "5 submissions are waiting to be graded." in back
+    assert "Retry grading 5 submissions to #1: <code>/regrade 1</code>" in back
     let_notice_interval_pass(h.db)
     await work.run_once(h.app.bot, h.app.bot_data["services"])
     assert len(notices(h)) == 3  # the held failures were reported in the back message

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 
-from telegram import BotCommand, BotCommandScopeChat, Update
+from telegram import BotCommandScopeChat, Update
 from telegram.error import TelegramError
 from telegram.ext import Application, ApplicationBuilder, ContextTypes
 
+from . import commands
 from .ai import AssessmentAI, build_provider
 from .alerts import AIMonitor
 from .config import Settings
@@ -20,32 +21,14 @@ from .utils import Services
 
 log = logging.getLogger(__name__)
 
-USER_COMMANDS = [
-    BotCommand("start", "Welcome and getting started"),
-    BotCommand("pending", "View assessments to complete"),
-    BotCommand("myresults", "View your assessment results"),
-    BotCommand("cancel", "Discard unsent answers"),
-    BotCommand("explain", "Get help with a question or file"),
-    BotCommand("help", "How to use the bot"),
-]
-ADMIN_COMMANDS = [
-    BotCommand("assessments", "List assessments"),
-    BotCommand("results", "Scores and CSV export"),
-    BotCommand("generate", "Create questions from replied-to notes"),
-    BotCommand("close", "Stop accepting answers for an assessment"),
-    BotCommand("regrade", "Retry failed grading"),
-    BotCommand("users", "Number of registered users"),
-    BotCommand("status", "Grading, sending and AI provider health"),
-]
-
-
 async def _post_init(application: Application) -> None:
     services: Services = application.bot_data["services"]
-    await application.bot.set_my_commands(USER_COMMANDS)
+    # Both menus come from the command registry (bot/commands.py).
+    await application.bot.set_my_commands(commands.menu(admin=False, settings=services.settings))
     for admin_id in services.settings.admin_ids:
         try:
             await application.bot.set_my_commands(
-                USER_COMMANDS + ADMIN_COMMANDS, scope=BotCommandScopeChat(admin_id)
+                commands.menu(admin=True, settings=services.settings), scope=BotCommandScopeChat(admin_id)
             )
         except TelegramError:
             # Telegram refuses this until the admin has started the bot once.
@@ -79,7 +62,9 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(update, Update) and update.effective_chat:
         try:
             await context.bot.send_message(
-                update.effective_chat.id, "⚠️ Something went wrong on my side. Please try again."
+                update.effective_chat.id,
+                "⚠️ Something went wrong on my side. Please try again. If it keeps happening, "
+                "/help lists what I can do."
             )
         except TelegramError:
             pass

@@ -1,6 +1,6 @@
 from telegram.ext import Application
 
-from . import admin, chat, common, dedupe, explain, student, uploads
+from . import admin, chat, common, dedupe, explain, guide, student, uploads
 
 
 def register_handlers(application: Application) -> None:
@@ -10,4 +10,5 @@ def register_handlers(application: Application) -> None:
     explain.register(application)
     uploads.register(application)
     student.register(application)
-    chat.register(application)  # last: its catch-all text handler must not shadow commands
+    chat.register(application)  # its catch-all text handler must not shadow commands
+    guide.register(application)  # last: maps the commands above to buttons, answers unknown ones

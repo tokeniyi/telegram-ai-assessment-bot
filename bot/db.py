@@ -623,6 +623,17 @@ class Database:
                GROUP BY assessment_id ORDER BY assessment_id DESC"""
         )
 
+    def grading_counts(self, assessment_id: int, grading_lease: float) -> dict[str, int]:
+        """How grading stands for one assessment (Stage 6): failed (needs /regrade), being graded
+        now (lease live), interrupted (lease ran out; the background work grades it again)."""
+        return self._one(
+            f"""SELECT COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+                       COUNT(*) FILTER (WHERE status = 'pending' AND NOT {self._STALE}) AS grading_now,
+                       COUNT(*) FILTER (WHERE status = 'pending' AND {self._STALE}) AS interrupted
+                FROM submissions WHERE assessment_id = %s AND status IN ('pending', 'failed')""",
+            (grading_lease, grading_lease, assessment_id),
+        )
+
     def status_overview(self, grading_lease: float) -> dict[str, Any]:
         """Everything /status shows, read from the shared tables (so it covers every process)."""
         grading = self._one(

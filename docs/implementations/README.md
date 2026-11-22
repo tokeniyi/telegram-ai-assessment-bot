@@ -11,6 +11,7 @@ are in [CLAUDE.md](../../CLAUDE.md).
 | 03 | Work that survives a restart | `claude/lucid-brahmagupta-dri4yd` | [#12](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/12) | Merged | [overview](phase-03/overview.md) · [implementation](phase-03/implementation.md) · [issues](phase-03/issues-and-fixes.md) · [testing](phase-03/testing.md) · [summary](phase-03/summary.md) |
 | 04 | Safer deploys | `claude/lucid-brahmagupta-dri4yd` | [#13](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/13) | Merged | [overview](phase-04/overview.md) · [implementation](phase-04/implementation.md) · [issues](phase-04/issues-and-fixes.md) · [testing](phase-04/testing.md) · [summary](phase-04/summary.md) |
 | 05 | Visibility for the admin | `claude/lucid-brahmagupta-dri4yd` | [#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14) | In review | [overview](phase-05/overview.md) · [implementation](phase-05/implementation.md) · [issues](phase-05/issues-and-fixes.md) · [testing](phase-05/testing.md) · [summary](phase-05/summary.md) |
+| 06 | Command guidance | `claude/stage-6-command-guidance` | PR_LINK | In review | [overview](phase-06/overview.md) · [implementation](phase-06/implementation.md) · [issues](phase-06/issues-and-fixes.md) · [testing](phase-06/testing.md) · [summary](phase-06/summary.md) |
 
 ## Before the staged roadmap
 

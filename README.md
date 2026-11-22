@@ -105,6 +105,13 @@ them too, so you can test the whole flow from a single account.
 - `/myresults` — scores so far
 - `/cancel` — discard the answers typed so far
 
+**Guidance.** You don't need to remember the commands. A mistyped command gets "did you mean"
+with the closest commands you may use. When a command cannot do what you asked, the reply says why
+(a wrong number, a draft that is not published yet, the AI not answering) and what to do instead,
+with real assessment numbers you can tap to copy. Safe next steps also come as buttons (📊 Results,
+🔁 Retry grading, 📝 Open assessments). Students are never shown administrators' commands, and
+grading that the bot is already retrying is reported as "no action needed".
+
 ## Project layout
 
 ```
@@ -118,11 +125,14 @@ bot/extract.py          PDF / DOCX / text extraction for files that have a text 
 bot/ocr/                OCR pipeline for scanned PDFs and images (see below)
 bot/ai/providers.py     Anthropic and OpenAI-compatible providers
 bot/ai/service.py       prompts, question generation, grading, reply validation
+bot/commands.py         the command registry: menus, /help, "did you mean" and suggestions
+bot/guidance.py         replies that explain a problem and suggest the next command (real ids)
 bot/alerts.py           tells the admins when the AI provider is down or grading keeps failing
 bot/logs.py             logging set-up and structured log events (text or JSON lines)
 bot/handlers/           admin, user and shared Telegram handlers; uploads.py routes every file
                         and photo, reading.py downloads and reads them, explain.py is /explain,
                         chat.py routes typed messages (chat, answer or review),
+                        guide.py answers unknown commands and runs command buttons,
                         work.py sends assessments and grades in the background
 tests/                  offline tests with a fake Telegram API and a fake AI
 ```

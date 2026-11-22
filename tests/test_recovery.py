@@ -331,7 +331,8 @@ async def test_a_result_lost_by_a_restart_is_sent_later_once(make_harness):
 async def test_regrade_leaves_a_submission_that_is_being_graded_alone(make_harness):
     old = await submit_and_crash_while_grading(make_harness)
     await old.text(ADMIN_ID, "/regrade 1")
-    assert "were being graded already" in old.tg.texts(ADMIN_ID)[-1]
+    assert "being graded right now" in old.tg.texts(ADMIN_ID)[-1]
+    assert "No action needed" in old.tg.texts(ADMIN_ID)[-1] and "<code>/regrade" not in old.tg.texts(ADMIN_ID)[-1]
     assert old.db.get_submission(1)["status"] == "pending"
 
     expire_grading_leases(old.db)  # abandoned: the admin may take it

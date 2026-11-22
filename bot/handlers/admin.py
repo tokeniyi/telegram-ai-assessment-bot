@@ -17,8 +17,11 @@ from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes, filters,
 )
 
-from ..ai import AIError
-from ..alerts import clock, regrade_hint
+from .. import commands, guidance
+from ..ai import AIError, AIUnavailable
+from ..alerts import clock
+from ..commands import Suggestion
+from ..guidance import AUTOMATIC, INPUT, PERMISSION, STATE, TEMPORARY, plural
 from ..extract import SUPPORTED_DESCRIPTION
 from ..utils import (
     display_name, esc, num, percent, question_blocks, send_blocks, services, total_points,
@@ -38,8 +41,18 @@ def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if _is_admin(update, context):
         return True
-    await update.effective_message.reply_text("🔒 This command is for administrators only.")
+    # Nothing an administrator's command could do is suggested; /help lists what this user can use.
+    await guidance.reply(update, context, "This command is for administrators only.",
+                         [Suggestion("help", why="What you can do")], kind=PERMISSION)
     return False
+
+
+def _ai_failure(exc: AIError, retry: str) -> tuple[str, str]:
+    """(kind, explanation) for a failed AI request: the provider not answering is temporary;
+    a reply that could not be used may work on another try."""
+    if isinstance(exc, AIUnavailable):
+        return TEMPORARY, f"The AI provider is not answering right now ({esc(exc)}). {retry} in a few minutes."
+    return STATE, f"{esc(exc)} {retry}."
 
 
 def _draft_keyboard(assessment_id: int) -> InlineKeyboardMarkup:
@@ -88,7 +101,11 @@ async def _create_draft(
         title, questions = await svc.ai.generate(material, instructions)
     except AIError as exc:
         log.error("Question generation failed: %s", exc)
-        await status.edit_text(f"❌ Could not generate questions: {exc}")
+        kind, why = _ai_failure(exc, "Nothing was saved; send the material again")
+        body, markup = guidance.render(
+            svc.settings, message.from_user.id, f"Could not generate questions. {why}",
+            [Suggestion("status", why="Check the AI provider")] if kind == TEMPORARY else [], kind=kind)
+        await status.edit_text(f"❌ {body}", parse_mode=ParseMode.HTML, reply_markup=markup)
         return
     assessment_id = svc.db.create_assessment(
         title, source_name, material, instructions, message.from_user.id, questions
@@ -123,16 +140,18 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif source and (source.text or source.caption):
         material, name = source.text or source.caption, "pasted text"
     else:
-        await message.reply_text(
-            f"📄 Send a {SUPPORTED_DESCRIPTION} to generate questions.\n"
-            "To use pasted notes instead: send the notes as a message, then reply to that message "
-            "with /generate (optionally followed by instructions, e.g. /generate 8 questions, easy)."
-        )
+        example = commands.COMMANDS["generate"].example
+        await guidance.reply(update, context,
+            f"/generate works as a reply. Send a {esc(SUPPORTED_DESCRIPTION)} to generate questions "
+            "directly, or send your notes as a message and reply to it with /generate, optionally "
+            f"followed by instructions: {commands.code(example)}", kind=INPUT)
         return
     if not material:
         return
     if len(material.strip()) < 100:
-        await message.reply_text("⚠️ There's not enough text to generate useful questions. Please send longer notes.")
+        await guidance.reply(update, context, "There's not enough text to generate useful questions "
+                             f"({len(material.strip())} characters; at least 100 are needed). Reply "
+                             "/generate to longer notes.", kind=INPUT)
         return
     await _create_draft(message, context, material, name, instructions)
 
@@ -169,9 +188,9 @@ async def on_draft_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             title, questions = await svc.ai.generate(assessment["source_text"], assessment["instructions"])
         except AIError as exc:
-            await context.bot.send_message(
-                chat_id, f"❌ Could not regenerate: {exc}", reply_markup=_draft_keyboard(assessment_id)
-            )
+            _, why = _ai_failure(exc, "The draft is unchanged; tap Regenerate again")
+            await context.bot.send_message(chat_id, f"❌ Could not regenerate. {why}", parse_mode=ParseMode.HTML,
+                                           reply_markup=_draft_keyboard(assessment_id))
             return
         if not svc.db.replace_questions(assessment_id, title, questions):
             await context.bot.send_message(
@@ -194,7 +213,7 @@ async def on_draft_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         log.info("Assessment %s published; sending to %s users", assessment_id, queued)
         if not queued:  # nobody to send it to: there is no queue to report on
             svc.db.mark_report_sent(assessment_id)
-            await context.bot.send_message(chat_id, work.delivery_report(assessment_id, {}))
+            await context.bot.send_message(chat_id, work.delivery_report(assessment_id, {}), parse_mode=ParseMode.HTML)
             return
         # Sent from the queue: if the bot stops halfway, the next start sends the rest.
         await work.deliver(context.bot, svc, assessment_id)
@@ -202,24 +221,63 @@ async def on_draft_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 # ── commands ─────────────────────────────────────────────────────────────
-async def _assessment_from_args(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, default_latest: bool
-) -> dict[str, Any] | None:
+_NOT_POSSIBLE = {  # (command, state) -> why the command cannot act on an assessment in that state
+    ("close", "draft"): "is still a draft, so it has not been sent to anyone. Publish it with "
+                        "📤 Send to all users under its preview.",
+    ("close", "closed"): "is already closed.",
+    ("results", "draft"): "is still a draft, so nobody has answered it yet.",
+    ("regrade", "draft"): "is still a draft, so it has no submissions to grade.",
+}
+
+
+async def _assessment_from_args(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str) -> dict[str, Any] | None:
+    """The assessment named in the command's argument, checked against what the command accepts
+    (commands.COMMANDS). When it is missing or wrong, the reply shows the command with ids it
+    can act on right now, taken from the database."""
     db = services(context).db
-    message = update.effective_message
+    spec = commands.COMMANDS[command]
+    arg = spec.args[0]
+    choices = lambda: guidance.assessment_choices(db, command)  # noqa: E731
+
     if context.args:
-        raw = context.args[0].lstrip("#")
-        assessment = db.get_assessment(int(raw)) if raw.isdigit() else None
+        raw = context.args[0]
+        if not arg.accepts(raw):
+            options = choices()  # real ids, never the registry's sample one
+            await guidance.reply(update, context, f"“{esc(raw)}” is not an assessment number. "
+                                 + ("For example:" if options else f"Write it as {commands.code(spec.usage)}."),
+                                 options, kind=INPUT)
+            return None
+        assessment = db.get_assessment(int(raw.lstrip("#")))
         if assessment is None:
-            await message.reply_text(f"There is no assessment {context.args[0]}. See /assessments.")
+            options = choices()
+            await guidance.reply(update, context, f"There is no assessment #{esc(raw.lstrip('#'))}."
+                                 + (" Did you mean one of these?" if options else " See /assessments."),
+                                 options, kind=INPUT)
+            return None
+        if arg.states and assessment["status"] not in arg.states:
+            why = _NOT_POSSIBLE.get((command, assessment["status"]), f"{guidance.describe_state(assessment)}.")
+            nexts = [guidance.results_suggestion(assessment["id"])] \
+                if command == "close" and assessment["status"] == "closed" else []
+            await guidance.reply(update, context, f"Assessment #{assessment['id']} {why}", nexts, kind=STATE)
+            return None
         return assessment
-    if default_latest:
-        latest = [a for a in db.list_assessments() if a["status"] != "draft"]
+
+    if not arg.required:  # /results: the latest published or closed assessment
+        latest = [a for a in db.list_assessments() if a["status"] in arg.states]
         if latest:
             return db.get_assessment(latest[0]["id"])
-        await message.reply_text("📭 No assessment has been published yet. Publish a draft first.")
+        await guidance.reply(update, context, "No assessment has been published yet, so there are no "
+                             "results. Send a document or photo to create a draft, then publish it.", kind=STATE)
         return None
-    await message.reply_text("Give the assessment number, for example: /close 3  (see /assessments)")
+
+    options = choices()
+    if options:
+        await guidance.reply(update, context, f"/{command} needs an assessment number, for example:",
+                             options, kind=INPUT)
+    else:
+        nothing = {"close": "No assessment is open, so there is nothing to close.",
+                   "regrade": "No grading has failed, so there is nothing to retry."}[command]
+        await guidance.reply(update, context, f"/{command} needs an assessment number. {nothing}", kind=STATE)
     return None
 
 
@@ -237,16 +295,22 @@ async def assessments(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"{icons.get(row['status'], '')} <b>#{row['id']}</b> {esc(row['title'])} — {row['status']}, "
             f"{row['num_questions']} questions, {row['num_submitters']} submitted"
         )
-    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    db = services(context).db
+    nexts = guidance.regrade_suggestions(db)  # only what needs the admin
+    answered = [r for r in rows if r["status"] != "draft" and r["num_submitters"]]
+    if answered:
+        nexts.append(guidance.results_suggestion(answered[0]["id"], f"Scores of #{answered[0]['id']}"))
+    await guidance.reply(update, context, "\n".join(lines), nexts)
 
 
 async def results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_admin(update, context):
         return
-    assessment = await _assessment_from_args(update, context, default_latest=True)
+    assessment = await _assessment_from_args(update, context, "results")
     if assessment is None:
         return
-    db = services(context).db
+    svc = services(context)
+    db = svc.db
     rows = db.latest_submissions(assessment["id"])
     questions = db.get_questions(assessment["id"])
     header = f"📊 <b>#{assessment['id']} — {esc(assessment['title'])}</b> ({assessment['status']})"
@@ -262,8 +326,14 @@ async def results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if graded:
         average = sum(r["score"] for r in graded) / len(graded)
         summary += f" · average {num(round(average, 2))}/{num(graded[0]['max_score'])}"
+    nexts = []
     if len(graded) < len(rows):
-        summary += f"\n⚠️ {len(rows) - len(graded)} not graded yet — run /regrade {assessment['id']}"
+        counts = db.grading_counts(assessment["id"], work.grading_lease(svc))
+        summary += "\n" + "\n".join(guidance.grading_lines(counts))
+        if counts["failed"]:  # only failed grading needs the admin; the rest finishes by itself
+            nexts = [Suggestion("regrade", (str(assessment["id"]),), why="Retry the failed grading",
+                                button=f"🔁 Retry grading #{assessment['id']}")]
+    summary, markup = guidance.render(svc.settings, update.effective_user.id, summary, nexts)
     blocks = [summary]
     for rank, row in enumerate(rows, start=1):
         if row["status"] == "graded":
@@ -272,7 +342,7 @@ async def results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             score = "not graded"
         blocks.append(f"{rank}. {esc(display_name(row))} — {score}")
     # one line per user: join them so they are not separated by blank lines
-    await send_blocks(context.bot, update.effective_chat.id, [blocks[0], "\n".join(blocks[1:])])
+    await send_blocks(context.bot, update.effective_chat.id, [blocks[0], "\n".join(blocks[1:])], reply_markup=markup)
 
     buffer = io.StringIO()
     writer = csv.writer(buffer)
@@ -299,53 +369,74 @@ async def results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _require_admin(update, context):
         return
-    assessment = await _assessment_from_args(update, context, default_latest=False)
+    assessment = await _assessment_from_args(update, context, "close")
     if assessment is None:
         return
-    if not services(context).db.close_assessment(assessment["id"]):
-        await update.effective_message.reply_text(
-            f"Assessment #{assessment['id']} is {assessment['status']}, not open."
-        )
+    aid = assessment["id"]
+    if not services(context).db.close_assessment(aid):  # closed meanwhile (another admin or process)
+        await guidance.reply(update, context, f"Assessment #{aid} is already closed.",
+                             [guidance.results_suggestion(aid)], kind=STATE)
         return
-    await update.effective_message.reply_text(
-        f"🔒 Assessment #{assessment['id']} is closed. No more answers are accepted."
-    )
+    await guidance.reply(update, context, f"🔒 Assessment #{aid} is closed. No more answers are accepted.",
+                         [guidance.results_suggestion(aid, "See the final scores")])
 
 
 async def regrade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Grade the submissions of an assessment whose grading failed earlier."""
+    """Grade the submissions of an assessment whose grading failed (or was abandoned).
+
+    Each submission is claimed in the database just before it is graded (claim_for_regrade), so
+    two /regrade runs, a double tap on a retry button, or the background work never grade the
+    same submission twice: whoever does not get the claim leaves it alone.
+    """
     if not await _require_admin(update, context):
         return
-    assessment = await _assessment_from_args(update, context, default_latest=False)
+    assessment = await _assessment_from_args(update, context, "regrade")
     if assessment is None:
         return
     message = update.effective_message
     svc = services(context)
-    waiting = svc.db.ungraded_submissions(assessment["id"])
-    if not waiting:
-        await message.reply_text("✅ All submissions for this assessment have already been graded.")
-        return
+    aid = assessment["id"]
     lease = work.grading_lease(svc)
-    await message.reply_text(f"⏳ Grading {len(waiting)} submission(s)…")
+    counts = svc.db.grading_counts(aid, lease)
+    if not counts["failed"] and not counts["interrupted"]:
+        if counts["grading_now"]:
+            await guidance.reply(update, context, f"{plural(counts['grading_now'], 'submission')} to #{aid} "
+                                 "being graded right now; results are sent when ready. No action needed.",
+                                 kind=AUTOMATIC)
+        elif not svc.db.latest_submissions(aid):
+            await guidance.reply(update, context, f"Nobody has submitted answers to #{aid} yet, so there "
+                                 "is nothing to grade.", kind=STATE)
+        else:
+            await guidance.reply(update, context, f"Every submission to #{aid} is already graded.",
+                                 [guidance.results_suggestion(aid)], kind=STATE)
+        return
+    waiting = svc.db.ungraded_submissions(aid)
+    await message.reply_text(f"⏳ Grading {plural(counts['failed'] + counts['interrupted'], 'submission')}…")
     done = busy = delivered = 0
     for submission in waiting:
         # Claimed one at a time, just before grading, so that a long batch does not outlive its
-        # leases. One that is being graded right now (just submitted, or picked up after a
-        # restart) is left to whoever is grading it.
+        # leases. One that is being graded right now (just submitted, picked up after a restart,
+        # or by another /regrade) is left to whoever is grading it.
         if not svc.db.claim_for_regrade(submission["id"], lease):
             busy += 1
             continue
         try:
             blocks = await work.grade(svc, submission["id"])
         except AIError as exc:
-            await message.reply_text(f"❌ Stopped after {done}: {exc}")
+            left = svc.db.grading_counts(aid, lease)["failed"]
+            kind, why = _ai_failure(exc, "Try again")
+            await guidance.reply(update, context,
+                f"Stopped after grading {done}. {why}\n{plural(left, 'submission')} still to grade; "
+                "the students' answers are saved.",
+                [Suggestion("regrade", (str(aid),), why="Retry", button=f"🔁 Retry grading #{aid}")], kind=kind)
             return
         done += 1
         if blocks is not None and await work.send_result(context.bot, svc, submission, blocks):
             delivered += 1
     report = f"✅ Graded {done} submission(s); {delivered} user(s) received their result."
     if busy:
-        report += f"\n⏳ {busy} were being graded already and will be sent when ready."
+        report += (f"\n🔁 {busy} were being graded already (by another process or retry) and will be "
+                   "sent when ready. No action needed.")
     await message.reply_text(report)
 
 
@@ -427,7 +518,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         grading.append(f"🔁 {overview['interrupted']} interrupted; graded again automatically")
     failed = overview["failed_grading"]
     if failed:
-        grading.append(f"❌ {sum(r['n'] for r in failed)} failed. {regrade_hint(failed[:5])}")
+        grading.append(f"❌ {sum(r['n'] for r in failed)} failed.")
         if overview["grading_error"]:
             grading.append(f"   Latest error: {esc(overview['grading_error'])}")
     if overview["results_unsent"]:
@@ -448,9 +539,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         sending.append(f"🚫 {overview['blocked_users']} user(s) have blocked the bot")
     lines += sending or ["✅ Nothing queued or failed"]
 
+    body, markup = guidance.render(svc.settings, update.effective_user.id, "\n".join(lines),
+                                   guidance.regrade_suggestions(svc.db))  # only failed grading needs the admin
     mode = "webhook" if svc.settings.webhook_url else "polling"
-    lines += ["", f"<i>Answered by a process running for {_uptime(time.monotonic() - svc.started_at)} ({mode}).</i>"]
-    await message.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    body += f"\n\n<i>Answered by a process running for {_uptime(time.monotonic() - svc.started_at)} ({mode}).</i>"
+    await message.edit_text(body, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 def register(application: Application) -> None:

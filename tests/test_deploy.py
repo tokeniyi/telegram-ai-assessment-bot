@@ -322,7 +322,7 @@ async def test_a_deploy_handover_loses_nothing_and_handles_nothing_twice(start_b
     new, new_task = await start_bot()  # Railway starts the new version; it becomes healthy
     assert await http(new.web.port) == (200, {"status": "ok"})
     api.push(message_update(12, ADMIN_ID, "/users"))  # both versions may fetch this one
-    await until(lambda: any("registered users" in t for t in api.texts(ADMIN_ID)))
+    await until(lambda: any(t.startswith("👥") for t in api.texts(ADMIN_ID)))  # the /users reply
     old.request_stop()  # Railway stops the old version
     api.push(message_update(13, ADMIN_ID, "/assessments"))
     await until(lambda: any("Assessments" in t for t in api.texts(ADMIN_ID)))
@@ -330,7 +330,7 @@ async def test_a_deploy_handover_loses_nothing_and_handles_nothing_twice(start_b
     await asyncio.wait_for(old_task, 10)
 
     assert api.conflicts > 0  # the two versions really did poll at the same time
-    assert sum("registered users" in t for t in api.texts(ADMIN_ID)) == 1
+    assert sum(t.startswith("👥") for t in api.texts(ADMIN_ID)) == 1
     assert sum("<b>Assessments</b>" in t for t in api.texts(ADMIN_ID)) == 1
     results = [t for t in api.texts(STUDENT_ID) if "Result" in t]
     assert len(results) == 1  # graded by the old version before it exited, not twice
