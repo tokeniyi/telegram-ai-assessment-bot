@@ -116,7 +116,7 @@ them too, so you can test the whole flow from a single account.
 - `/myresults` — scores so far
 - `/cancel` — discard the answers typed so far
 - `/checkins [on|off|pause]` — study check-ins. With your first `/start` the bot asks whether you
-  want them. If you say yes, it sends you a short AI-written message every `CHECKIN_DAYS` (3) days at
+  want them (students who registered earlier are asked once by message). If you say yes, it sends you a short AI-written message every `CHECKIN_DAYS` (3) days at
   `CHECKIN_HOUR` (17:00, in `TIMEZONE`). The message suggests something to review and invites you
   to reply if you're stuck. A reply goes to the chat like any other message. `pause` stops them for
   a week. The bot sends them less often if you don't answer, and skips a day when you just used the

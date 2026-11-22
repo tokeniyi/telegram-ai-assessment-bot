@@ -4,8 +4,8 @@
 |---|---|
 | Roadmap stage | None. This is a side feature, outside the staged roadmap ([ROADMAP.md](../../../ROADMAP.md), "Outside the stages") |
 | Branch | `claude/modest-allen-wfagwm` |
-| Pull request | [#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19) |
-| Status | Merged |
+| Pull request | [#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19) (the feature), [#20](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/20) (the one-time announcement) |
+| Status | #19 merged; #20 in review |
 
 ## Features implemented
 
@@ -30,6 +30,23 @@
   - nothing is offered or sent;
   - `/checkins` says the feature is switched off;
   - students' choices are kept for when it is switched on again.
+
+### The one-time announcement (PR #20)
+
+- `work.announce_checkins` runs in the background loop, before the check-ins themselves. It offers
+  check-ins to active non-admin users who have no `study_checkins` row: they registered before the
+  feature, or never sent `/start`.
+- `Database.claim_checkin_offers` inserts their rows as `offered` (`INSERT … SELECT … ON CONFLICT DO
+  NOTHING RETURNING`). Only the process whose insert succeeds gets a user, so each one is taken once
+  ever, by one process. 25 users per pass (`CHECKIN_OFFERS_PER_PASS`), so a large class is spread
+  over passes.
+- The message is the `/start` question with the heading "📅 New: study check-ins" and the same
+  `chk:on`/`chk:off` buttons (`handlers/checkins.offer(…, announcement=True)`).
+- Forbidden: the user is marked inactive and check-ins `blocked`. Other Telegram errors are logged
+  and not repeated (at most once); the user can still find `/checkins`.
+- Nothing is announced with `CHECKIN_DAYS=0`. Users then stay without a row, and are asked once the
+  feature is switched on.
+- Log events: `checkin.offered`, `checkin.offer_failed`, `checkin.offer_blocked`.
 
 ### When a check-in is sent
 
@@ -129,11 +146,11 @@ A "Study check-ins" section shows:
 |---|---|
 | [bot/checkins.py](../../../bot/checkins.py) | New: `slot`, `day_start`, `gap_days`, `decide`, fact `SOURCES`, `compose`, built-in text, message HTML |
 | [bot/handlers/checkins.py](../../../bot/handlers/checkins.py) | New: `/checkins`, the `chk:` buttons, the offer text |
-| [bot/handlers/work.py](../../../bot/handlers/work.py) | `send_checkins` and `checkin_markup`; added to `run_once` |
+| [bot/handlers/work.py](../../../bot/handlers/work.py) | `send_checkins` and `checkin_markup`; `announce_checkins` (#20); both added to `run_once` |
 | [bot/handlers/common.py](../../../bot/handlers/common.py) | `/start` offers check-ins once to students |
 | [bot/handlers/admin.py](../../../bot/handlers/admin.py) | `checkin_lines` in `/status` |
 | [bot/ai/service.py](../../../bot/ai/service.py) | `CHECKIN_SYSTEM`, `AssessmentAI.checkin` |
-| [bot/db.py](../../../bot/db.py) | Schema below; `offer_checkins`, `get_checkins`, `set_checkins`, `claim_checkin`, `finish_checkin`, `prune_checkin_log`, `checkin_overview`; `upsert_user` sets `last_active_at` |
+| [bot/db.py](../../../bot/db.py) | Schema below; `offer_checkins`, `get_checkins`, `set_checkins`, `claim_checkin`, `finish_checkin`, `prune_checkin_log`, `checkin_overview`, `claim_checkin_offers` (#20); `upsert_user` sets `last_active_at` |
 | [bot/commands.py](../../../bot/commands.py) | `/checkins [choice]`, `feature="checkin_days"` |
 | [bot/config.py](../../../bot/config.py) | `CHECKIN_DAYS`, `CHECKIN_HOUR` |
 | [tests/conftest.py](../../../tests/conftest.py) | The fake AI answers the check-in prompt |

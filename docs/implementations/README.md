@@ -22,7 +22,7 @@ stages"). They use the same five files.
 
 | Feature | Topic | Branch | PR | Status | Docs |
 |---|---|---|---|---|---|
-| Study check-ins | AI-written check-ins every few days for students who opt in | `claude/modest-allen-wfagwm` | [#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19) | Merged | [overview](feature-study-checkins/overview.md) · [implementation](feature-study-checkins/implementation.md) · [issues](feature-study-checkins/issues-and-fixes.md) · [testing](feature-study-checkins/testing.md) · [summary](feature-study-checkins/summary.md) |
+| Study check-ins | AI-written check-ins every few days for students who opt in | `claude/modest-allen-wfagwm` | [#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19), [#20](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/20) | #19 merged; #20 in review | [overview](feature-study-checkins/overview.md) · [implementation](feature-study-checkins/implementation.md) · [issues](feature-study-checkins/issues-and-fixes.md) · [testing](feature-study-checkins/testing.md) · [summary](feature-study-checkins/summary.md) |
 
 ## Before the staged roadmap
 

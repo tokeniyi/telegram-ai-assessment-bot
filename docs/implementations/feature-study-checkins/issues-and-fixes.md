@@ -4,11 +4,11 @@
 |---|---|
 | Roadmap stage | None. This is a side feature, outside the staged roadmap ([ROADMAP.md](../../../ROADMAP.md), "Outside the stages") |
 | Branch | `claude/modest-allen-wfagwm` |
-| Pull request | [#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19) |
-| Status | Merged |
+| Pull request | [#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19) (the feature), [#20](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/20) (the one-time announcement) |
+| Status | #19 merged; #20 in review |
 
-No bug in the bot's code was found while building this feature. The problems below were in tests
-and in what they could observe.
+Items 1–4 were in tests and in what they could observe, while building the feature (#19). Item 5
+was a bug in the bot's code, found by an existing test before the announcement (#20) was pushed.
 
 ### 1. An existing test assumed `/start` has no buttons
 - **Symptom:** after the offer was added, `tests/test_ocr_flow.py::test_explain_caption_wins_over_an_open_assessment`
@@ -45,3 +45,15 @@ and in what they could observe.
   (`test_two_processes_claiming_at_the_same_moment_send_one_check_in`). It uses two `Database`
   pools, a barrier, and a `decide` that sleeps while it holds the row. Without the lock it fails;
   with it, it passes.
+
+### 5. The announcement's insert was missing its status value (PR #20)
+- **Symptom:** with the announcement added, the full suite had one failure:
+  `tests/test_deploy.py::test_main_py_reports_healthy_and_exits_cleanly_on_sigterm`, because the bot
+  process logged a traceback.
+- **Root cause:** `claim_checkin_offers` inserted into `(user_id, status)` from `SELECT u.user_id`
+  alone: "INSERT has more target columns than expressions". The background loop catches step
+  errors, so in production the announcement would have failed quietly every 30 seconds.
+- **Investigation:** the subprocess output of the deploy test was printed; it showed the
+  PostgreSQL error from `announce_checkins`. It was the only failing test: other tests ran the same
+  broken step, but the loop caught the error and they do not check the log for tracebacks.
+- **Fix:** `SELECT u.user_id, 'offered'`. The new announcement tests then cover this path directly.

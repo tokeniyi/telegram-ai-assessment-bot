@@ -367,3 +367,103 @@ def test_two_processes_claiming_at_the_same_moment_send_one_check_in(pg_url):
     finally:
         first.close()
         second.close()
+
+
+# ── the one-time announcement to students who were never asked ──────────
+ANNOUNCED = "New: study check-ins"
+EARLIER = [4001, 4002, 4003]
+
+
+def announcements_to(harnesses, user_id):
+    return sum(ANNOUNCED in t for h in harnesses for t in h.tg.texts(user_id))
+
+
+def registered_before_check_ins(h, user_ids):
+    """Users the bot knew before the feature existed: no study_checkins row."""
+    for user_id in user_ids:
+        h.db.upsert_user(user_id, f"u{user_id}", f"Early {user_id}")
+
+
+async def test_students_registered_before_check_ins_are_asked_once(make_harness):
+    a = await make_harness()
+    b = await make_harness()
+    registered_before_check_ins(a, [*EARLIER, ADMIN_ID, 4004, 4005])
+    a.db.set_user_active(4004, False)              # blocked the bot earlier: not messaged
+    a.db.set_checkins(4005, "off")                 # already chose: not asked again
+    await opted_in(a, STUDENT_ID)                  # asked at /start: not asked again
+
+    await asyncio.gather(work.run_once(a.app.bot, svc(a)), work.run_once(b.app.bot, svc(b)))
+    await work.run_once(a.app.bot, svc(a))
+    await work.run_once(b.app.bot, svc(b))         # later passes, and the other process: nothing new
+    for user_id in EARLIER:
+        assert announcements_to((a, b), user_id) == 1, user_id
+        assert a.db.get_checkins(user_id)["status"] == "offered"
+    for user_id in (ADMIN_ID, 4004, 4005, STUDENT_ID):
+        assert announcements_to((a, b), user_id) == 0, user_id
+
+    (text, buttons), = [(t, k) for h in (a, b) for t, k in sent(h, EARLIER[0]) if ANNOUNCED in t]
+    assert "every 3 days" in text and buttons == ["chk:on", "chk:off"]
+    harness = a if any(ANNOUNCED in t for t in a.tg.texts(EARLIER[0])) else b
+    await harness.press(EARLIER[0], "chk:on")
+    assert a.db.get_checkins(EARLIER[0])["status"] == "on"
+
+
+async def test_the_announcement_is_spread_over_passes(harness):
+    h = harness
+    many = list(range(5000, 5000 + work.CHECKIN_OFFERS_PER_PASS + 5))
+    registered_before_check_ins(h, many)
+    await work.announce_checkins(h.app.bot, svc(h))
+    assert sum(announcements_to([h], u) for u in many) == work.CHECKIN_OFFERS_PER_PASS
+    await work.announce_checkins(h.app.bot, svc(h))
+    assert all(announcements_to([h], u) == 1 for u in many)
+
+
+async def test_a_student_who_blocked_the_bot_is_marked_by_the_announcement(harness):
+    h = harness
+    registered_before_check_ins(h, [EARLIER[0]])
+    h.tg.fail = lambda method, params: (403, "Forbidden: bot was blocked by the user") \
+        if method == "sendMessage" else None
+    await work.announce_checkins(h.app.bot, svc(h))
+    assert h.db.get_checkins(EARLIER[0])["status"] == "blocked"
+    assert h.db.active_user_ids() == []
+
+
+async def test_no_announcement_when_check_ins_are_switched_off(make_harness):
+    h = await make_harness(checkin_days=0)
+    registered_before_check_ins(h, EARLIER)
+    await work.run_once(h.app.bot, svc(h))
+    assert all(announcements_to([h], u) == 0 for u in EARLIER)
+    assert h.db.get_checkins(EARLIER[0]) is None  # still to be asked once they are switched on
+
+
+def test_two_processes_announcing_at_once_take_each_student_once(pg_url):
+    import threading
+
+    from bot.db import Database
+    first, second = Database(pg_url), Database(pg_url)
+    try:
+        users = list(range(6000, 6200))
+        for user_id in users:
+            first.upsert_user(user_id, None, None)
+        start = threading.Barrier(2)
+        taken = {}
+
+        def claim(name, db):
+            start.wait()
+            got = []
+            for _ in range(20):  # 200 users, 25 per claim: bounded so a repeating claim fails, not hangs
+                ids = db.claim_checkin_offers(25, [ADMIN_ID])
+                if not ids:
+                    break
+                got += ids
+            taken[name] = got
+
+        threads = [threading.Thread(target=claim, args=(n, db)) for n, db in (("a", first), ("b", second))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert sorted(taken["a"] + taken["b"]) == users  # everyone once, nobody twice
+    finally:
+        first.close()
+        second.close()
