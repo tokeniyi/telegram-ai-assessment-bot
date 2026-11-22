@@ -80,6 +80,8 @@ class FakeProvider:
             return self.replies.pop(0)
         if system.startswith("You are the chat assistant"):
             return json.dumps(fake_chat_decision(user))
+        if system.startswith("You are a friendly study companion"):
+            return json.dumps({"message": "How is your revision going? <b>Reply</b> if you're stuck."})
         if system.startswith("You write"):
             return json.dumps(GENERATED)
         if system.startswith("You are a patient tutor"):

@@ -139,7 +139,9 @@ async def test_explain_caption_wins_over_an_open_assessment(harness):
     system, user = h.ai.calls[-1]
     assert system.startswith("You are a patient tutor")
     assert "<question>\nwhy is oxygen released?\n</question>" in user and "Water is split" in user
-    assert h.tg.last_keyboard(STUDENT_ID) == []  # not stored as an answer
+    # not stored as an answer: no draft buttons (the only keyboard is the check-in offer at /start)
+    assert not any(b.startswith("ans:") for b in h.tg.last_keyboard(STUDENT_ID))
+    assert h.db.draft_parts(STUDENT_ID, 1) == []
     assert h.tg.texts(STUDENT_ID)[-1].startswith("💡")
 
 
