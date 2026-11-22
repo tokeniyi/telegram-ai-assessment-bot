@@ -5,7 +5,7 @@
 | Roadmap stage | None. This is a side feature, outside the staged roadmap ([ROADMAP.md](../../../ROADMAP.md), "Outside the stages") |
 | Branch | `claude/modest-allen-wfagwm` |
 | Pull request | [#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19) |
-| Status | In review |
+| Status | Merged |
 
 No bug in the bot's code was found while building this feature. The problems below were in tests
 and in what they could observe.
