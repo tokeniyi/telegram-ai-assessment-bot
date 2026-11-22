@@ -98,6 +98,14 @@ COMMANDS: dict[str, Command] = {c.name: c for c in (
             example="/generate 8 questions, easy", invocations=("reply",)),
     Command("close", "Stop accepting answers for an assessment", role=ADMIN,
             args=(Arg("id", ASSESSMENT, example="3", states=("published",)),), example="/close 3"),
+    # Stage 7. /deadline changes an assessment, so it is typed, never run from a button.
+    Command("deadline", "Set when an assessment closes", role=ADMIN,
+            args=(Arg("id", ASSESSMENT, example="3", states=("draft", "published")),
+                  Arg("when", "text", required=False, example="tomorrow 17:00")),
+            example="/deadline 3 tomorrow 17:00"),
+    # A button only shows the options; changing one takes a second tap on an explicit value.
+    Command("settings", "Deadline, answers shown and resubmission for one assessment", role=ADMIN,
+            button=True, args=(Arg("id", ASSESSMENT, example="3"),), example="/settings 3"),
     # A button may run /regrade: each submission is claimed in the database before it is graded,
     # so a double tap or two admins cannot grade one twice.
     Command("regrade", "Retry failed grading", role=ADMIN, button=True,

@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
@@ -17,12 +18,13 @@ from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes, filters,
 )
 
-from .. import commands, guidance
+from .. import commands, deadlines, guidance
 from ..ai import AIError, AIUnavailable
 from ..alerts import clock
 from ..commands import Suggestion
 from ..guidance import AUTOMATIC, INPUT, PERMISSION, STATE, TEMPORARY, plural
 from ..extract import SUPPORTED_DESCRIPTION
+from ..logs import event
 from ..utils import (
     display_name, esc, num, percent, question_blocks, send_blocks, services, total_points,
 )
@@ -55,13 +57,19 @@ def _ai_failure(exc: AIError, retry: str) -> tuple[str, str]:
     return STATE, f"{esc(exc)} {retry}."
 
 
+def _settings_suggestion(assessment_id: int, why: str = "Deadline and options") -> Suggestion:
+    return Suggestion("settings", (str(assessment_id),), why=why, button=f"⚙️ Settings #{assessment_id}")
+
+
 def _draft_keyboard(assessment_id: int) -> InlineKeyboardMarkup:
+    settings = _settings_suggestion(assessment_id)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Send to all users", callback_data=f"pub:{assessment_id}")],
         [
             InlineKeyboardButton("🔄 Regenerate", callback_data=f"regen:{assessment_id}"),
             InlineKeyboardButton("🗑 Discard", callback_data=f"del:{assessment_id}"),
         ],
+        [InlineKeyboardButton(settings.button, callback_data=settings.callback_data)],
     ])
 
 
@@ -72,6 +80,7 @@ async def _send_preview(context: ContextTypes.DEFAULT_TYPE, chat_id: int, assess
     header = (
         f"📝 <b>Draft #{assessment_id} — {esc(assessment['title'])}</b>\n"
         f"{len(questions)} questions · {num(total_points(questions))} points\n"
+        f"{_options_summary(services(context).settings, assessment)}\n"
         "🔒 Reference answers are visible only to administrators. Review before publishing."
     )
     await send_blocks(
@@ -201,6 +210,15 @@ async def on_draft_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _send_preview(context, chat_id, assessment_id)
 
     elif action == "pub":
+        if assessment["deadline"] and assessment["deadline"] <= datetime.now(timezone.utc):
+            await query.answer()
+            await guidance.reply(update, context,
+                f"The deadline of draft #{assessment_id} "
+                f"({esc(deadlines.format_moment(assessment['deadline'], svc.settings.tz))}) has passed, so it "
+                "was not sent. Set a new deadline (or remove it), then tap 📤 Send to all users again.",
+                [Suggestion("deadline", (str(assessment_id), "2d"), why="Close in 2 days"),
+                 Suggestion("deadline", (str(assessment_id), "off"), why="No deadline")], kind=STATE)
+            return
         # One database step changes the status and queues the messages, so of two taps (or two
         # bot processes) only one gets past this line.
         queued = svc.db.publish_assessment(assessment_id, update.effective_user.id)
@@ -227,6 +245,7 @@ _NOT_POSSIBLE = {  # (command, state) -> why the command cannot act on an assess
     ("close", "closed"): "is already closed.",
     ("results", "draft"): "is still a draft, so nobody has answered it yet.",
     ("regrade", "draft"): "is still a draft, so it has no submissions to grade.",
+    ("deadline", "closed"): "is closed, so its deadline can no longer be changed.",
 }
 
 
@@ -257,7 +276,7 @@ async def _assessment_from_args(update: Update, context: ContextTypes.DEFAULT_TY
         if arg.states and assessment["status"] not in arg.states:
             why = _NOT_POSSIBLE.get((command, assessment["status"]), f"{guidance.describe_state(assessment)}.")
             nexts = [guidance.results_suggestion(assessment["id"])] \
-                if command == "close" and assessment["status"] == "closed" else []
+                if command in ("close", "deadline") and assessment["status"] == "closed" else []
             await guidance.reply(update, context, f"Assessment #{assessment['id']} {why}", nexts, kind=STATE)
             return None
         return assessment
@@ -276,7 +295,9 @@ async def _assessment_from_args(update: Update, context: ContextTypes.DEFAULT_TY
                              options, kind=INPUT)
     else:
         nothing = {"close": "No assessment is open, so there is nothing to close.",
-                   "regrade": "No grading has failed, so there is nothing to retry."}[command]
+                   "regrade": "No grading has failed, so there is nothing to retry.",
+                   "deadline": "No assessment is a draft or open, so there is nothing to set a deadline for.",
+                   "settings": "There are no assessments yet. Send a document or photo to create a draft."}[command]
         await guidance.reply(update, context, f"/{command} needs an assessment number. {nothing}", kind=STATE)
     return None
 
@@ -290,10 +311,14 @@ async def assessments(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     icons = {"draft": "✏️", "published": "🟢", "closed": "🔒"}
     lines = ["<b>Assessments</b> (newest first)"]
+    tz = services(context).settings.tz
     for row in rows:
+        due = ""
+        if row["deadline"] and row["status"] != "closed":
+            due = f", closes {esc(deadlines.format_moment(row['deadline'], tz))}"
         lines.append(
             f"{icons.get(row['status'], '')} <b>#{row['id']}</b> {esc(row['title'])} — {row['status']}, "
-            f"{row['num_questions']} questions, {row['num_submitters']} submitted"
+            f"{row['num_questions']} questions, {row['num_submitters']} submitted{due}"
         )
     db = services(context).db
     nexts = guidance.regrade_suggestions(db)  # only what needs the admin
@@ -450,6 +475,125 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+# ── deadlines and per-assessment options (Stage 7) ───────────────────────
+def _options_summary(settings, assessment: dict[str, Any]) -> str:
+    """One line for the draft preview: the deadline and both options."""
+    due = deadlines.describe(assessment["deadline"], settings.tz) if assessment["deadline"] else "none"
+    answers = "shown" if settings.shows_answers(assessment) else "hidden"
+    resubmit = "allowed" if settings.allows_resubmission(assessment) else "once only"
+    return f"⏰ Deadline: {esc(due)} · 📖 Reference answers after grading: {answers} · 🔁 Submitting: {resubmit}"
+
+
+def _deadline_examples(assessment: dict[str, Any]) -> list[Suggestion]:
+    aid = str(assessment["id"])
+    examples = [Suggestion("deadline", (aid, "2d"), why="Close in 2 days"),
+                Suggestion("deadline", (aid, "tomorrow 17:00"), why="Close tomorrow at 17:00")]
+    if assessment["deadline"]:
+        examples.append(Suggestion("deadline", (aid, "off"), why="Remove the deadline"))
+    return examples
+
+
+def _settings_view(settings, assessment: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    """/settings: the assessment's deadline and options, with a button per option that sets the
+    other value (an explicit value, so a double tap does not undo the first)."""
+    aid, status = assessment["id"], assessment["status"]
+    default = lambda column: " (bot default)" if assessment[column] is None else ""  # noqa: E731
+    answers = settings.shows_answers(assessment)
+    resubmit = settings.allows_resubmission(assessment)
+    lines = [
+        f"⚙️ <b>Settings of #{aid} — {esc(assessment['title'])}</b> ({status})",
+        f"⏰ Deadline: {esc(deadlines.describe(assessment['deadline'], settings.tz))}"
+        + (", closed" if status == "closed" else ""),
+        f"📖 Reference answers in results: {'shown' if answers else 'hidden'}{default('show_answers')}",
+        f"🔁 Resubmission: {'allowed, the latest attempt counts' if resubmit else 'not allowed, one submission each'}"
+        f"{default('allow_resubmission')}",
+        "<i>Changes apply from now on; results already sent stay as they are.</i>",
+    ]
+    if status in ("draft", "published"):  # typed: /deadline is not a button command
+        lines += [f"👉 {s.html()}" for s in _deadline_examples(assessment)]
+    body = "\n".join(lines)
+    rows = [[InlineKeyboardButton("📖 Hide reference answers" if answers else "📖 Show reference answers",
+                                  callback_data=f"opt:{aid}:show_answers:{int(not answers)}")]]
+    if status != "closed":
+        rows.append([InlineKeyboardButton("🔁 One submission only" if resubmit else "🔁 Allow resubmission",
+                                          callback_data=f"opt:{aid}:allow_resubmission:{int(not resubmit)}")])
+    return body, InlineKeyboardMarkup(rows)
+
+
+async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_admin(update, context):
+        return
+    assessment = await _assessment_from_args(update, context, "settings")
+    if assessment is None:
+        return
+    body, markup = _settings_view(services(context).settings, assessment)
+    await update.effective_message.reply_text(body, parse_mode=ParseMode.HTML, reply_markup=markup,
+                                              disable_web_page_preview=True)
+
+
+async def on_option_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not _is_admin(update, context):
+        await query.answer("Administrators only.", show_alert=True)
+        return
+    _, raw_id, option, value = query.data.split(":")
+    svc = services(context)
+    assessment = svc.db.get_assessment(int(raw_id))
+    if assessment is None:
+        await query.answer("This assessment no longer exists.", show_alert=True)
+        await query.edit_message_reply_markup(None)
+        return
+    if option == "allow_resubmission" and assessment["status"] == "closed":
+        await query.answer("This assessment is closed, so nobody can submit to it any more.", show_alert=True)
+        return
+    assessment = svc.db.set_option(assessment["id"], option, value == "1")
+    event(log, "assessment.option_changed", assessment=assessment["id"], option=option,
+          value=value == "1", admin=update.effective_user.id)
+    await query.answer("Saved")
+    body, markup = _settings_view(svc.settings, assessment)
+    await query.edit_message_text(body, parse_mode=ParseMode.HTML, reply_markup=markup, disable_web_page_preview=True)
+
+
+async def deadline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/deadline <id> [when]: show, set or remove when an assessment closes by itself."""
+    if not await _require_admin(update, context):
+        return
+    assessment = await _assessment_from_args(update, context, "deadline")
+    if assessment is None:
+        return
+    svc = services(context)
+    aid, tz = assessment["id"], svc.settings.tz
+    when = " ".join(context.args[1:]).strip()
+    if not when:
+        await guidance.reply(update, context, f"⏰ Deadline of #{aid}: "
+                             f"{esc(deadlines.describe(assessment['deadline'], tz))}. To change it, add when it "
+                             f"closes (times are {esc(svc.settings.timezone)}), for example:",
+                             _deadline_examples(assessment))
+        return
+    try:
+        new = deadlines.parse(when, datetime.now(timezone.utc), tz)
+    except deadlines.DeadlineError as exc:
+        await guidance.reply(update, context, f"{esc(exc)} Times are {esc(svc.settings.timezone)}. For example:",
+                             _deadline_examples(assessment), kind=INPUT)
+        return
+    row = svc.db.set_deadline(aid, new)
+    if row is None:  # closed meanwhile, or its old deadline passed before the background work closed it
+        await guidance.reply(update, context, f"Assessment #{aid} is closed, so its deadline can no longer be "
+                             "changed.", [guidance.results_suggestion(aid)], kind=STATE)
+        return
+    if new is None:
+        text = f"⏰ Assessment #{aid} has no deadline now. It stays open until you close it."
+    else:
+        text = (f"⏰ Assessment #{aid} now closes {esc(deadlines.describe(new, tz))}. After that no more "
+                "answers are accepted, and you are told how many students submitted.")
+        hours = svc.settings.reminder_hours
+        if hours:
+            text += f"\nStudents who haven't submitted are reminded {hours} h before."
+    if row["status"] == "draft":
+        text += "\nIt is still a draft: tap 📤 Send to all users under its preview to publish it."
+    await guidance.reply(update, context, text, [_settings_suggestion(aid, "All options")])
+
+
 # ── /status ──────────────────────────────────────────────────────────────
 STATUS_CHECK_TIMEOUT = 12  # seconds /status waits for the AI provider
 
@@ -551,7 +695,10 @@ def register(application: Application) -> None:
     application.add_handler(CommandHandler("assessments", assessments, filters=PRIVATE))
     application.add_handler(CommandHandler("results", results, filters=PRIVATE))
     application.add_handler(CommandHandler("close", close, filters=PRIVATE))
+    application.add_handler(CommandHandler("deadline", deadline, filters=PRIVATE))
+    application.add_handler(CommandHandler("settings", settings, filters=PRIVATE))
     application.add_handler(CommandHandler("regrade", regrade, filters=PRIVATE))
     application.add_handler(CommandHandler("users", users, filters=PRIVATE))
     application.add_handler(CommandHandler("status", status, filters=PRIVATE))
     application.add_handler(CallbackQueryHandler(on_draft_button, pattern=r"^(pub|regen|del):\d+$"))
+    application.add_handler(CallbackQueryHandler(on_option_button, pattern=r"^opt:\d+:(show_answers|allow_resubmission):[01]$"))

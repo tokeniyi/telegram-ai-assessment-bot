@@ -39,7 +39,7 @@ async def test_admin_photo_of_notes_becomes_an_assessment(harness):
     assert "Photosynthesis converts light energy" in user and "3 questions, easy" in user
     assessment = h.db.get_assessment(1)
     assert assessment["source_name"] == "photo" and "Osmosis moves water" in assessment["source_text"]
-    assert h.tg.last_keyboard(ADMIN_ID) == ["pub:1", "regen:1", "del:1"]
+    assert h.tg.last_keyboard(ADMIN_ID) == ["pub:1", "regen:1", "del:1", "cmd:settings:1"]
     summary = all_text(h, ADMIN_ID)
     assert "Text read from the image" in summary and "OCR confidence 9" in summary  # 9x or 99/100 percent
 

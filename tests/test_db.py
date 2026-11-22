@@ -108,11 +108,11 @@ def test_open_assessments_for_user(db):
     second = make_assessment(db, "published")
     closed = make_assessment(db, "closed")
     ids = lambda rows: [r["id"] for r in rows]
-    assert ids(db.open_assessments_for(7, include_submitted=False)) == [second, first]
+    assert ids(db.open_assessments_for(7, default_resubmission=False)) == [second, first]
     db.create_submission(first, 7, "mine")
-    assert ids(db.open_assessments_for(7, include_submitted=False)) == [second]
-    assert ids(db.open_assessments_for(7, include_submitted=True)) == [second, first]
-    assert ids(db.open_assessments_for(8, include_submitted=False)) == [second, first]
+    assert ids(db.open_assessments_for(7, default_resubmission=False)) == [second]
+    assert ids(db.open_assessments_for(7, default_resubmission=True)) == [second, first]
+    assert ids(db.open_assessments_for(8, default_resubmission=False)) == [second, first]
     assert draft not in ids(db.open_assessments_for(7, True)) and closed not in ids(db.open_assessments_for(7, True))
 
 

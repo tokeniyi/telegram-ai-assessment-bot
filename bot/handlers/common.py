@@ -31,7 +31,9 @@ ADMIN_HELP = (
     "1. Upload your teaching material. Add a caption such as "
     "<i>10 multiple-choice questions from chapter 2, hard</i> to guide question generation.\n"
     "2. Review the generated draft and reference answers.\n"
-    "3. Choose <b>Send to all users</b>, <b>Regenerate</b>, or <b>Discard</b>.\n\n"
+    "3. Optionally tap <b>⚙️ Settings</b> to set a deadline, whether students see reference answers, "
+    "and whether they may resubmit.\n"
+    "4. Choose <b>Send to all users</b>, <b>Regenerate</b>, or <b>Discard</b>.\n\n"
     "<b>Admin commands</b>"
 )
 

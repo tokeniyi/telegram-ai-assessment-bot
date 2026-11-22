@@ -1,4 +1,5 @@
-"""Slow work that must survive a restart: sending a published assessment and grading.
+"""Slow work that must survive a restart: sending a published assessment, grading, and (Stage 7)
+closing assessments at their deadline and reminding students before it.
 
 Both are driven from rows in PostgreSQL rather than from the handler that started them:
 
@@ -8,6 +9,10 @@ Both are driven from rows in PostgreSQL rather than from the handler that starte
 * A submission is leased to the process that grades it (Database.submit_draft). If that process
   stops, the lease runs out and the submission is graded again, at most MAX_GRADING_ATTEMPTS
   times, after which it is marked 'failed' for /regrade.
+
+* Deadlines (Stage 7): an assessment past its deadline is closed by one conditional UPDATE, which
+  hands it to one process to tell the publisher. Reminders are rows like deliveries, queued once per
+  assessment and taken one at a time; each is marked sent before it is sent (at most once).
 
 `run_forever` runs on start and then every WORK_INTERVAL seconds, so leftovers are picked up
 without an admin doing anything. The handlers call the same functions for the work they start.
@@ -32,11 +37,11 @@ from telegram.constants import ParseMode
 from telegram.error import Forbidden, RetryAfter, TelegramError, TimedOut
 from telegram.ext import Application
 
-from .. import guidance
+from .. import deadlines, guidance
 from ..ai import AIError
 from ..alerts import report_grading_failures
 from ..logs import event
-from ..utils import Services, pack_blocks, send_blocks, total_points
+from ..utils import Services, esc, pack_blocks, send_blocks, total_points
 from . import student
 
 log = logging.getLogger(__name__)
@@ -97,7 +102,7 @@ async def deliver(bot: Bot, svc: Services, assessment_id: int | None = None) -> 
         attempted += 1
         aid, user_id = row["assessment_id"], row["user_id"]
         if aid not in blocks_cache:
-            blocks_cache[aid] = student.assessment_blocks(db.get_assessment(aid), db.get_questions(aid))
+            blocks_cache[aid] = student.assessment_blocks(db.get_assessment(aid), db.get_questions(aid), svc.settings)
         fields = dict(assessment=aid, user=user_id, attempt=row["attempts"])
         try:
             await _send_once(bot, user_id, blocks_cache[aid])
@@ -186,7 +191,7 @@ async def grade(svc: Services, submission_id: int) -> list[str] | None:
         return None
     event(log, "grading.finished", **fields, score=score, max=maximum, seconds=time.monotonic() - started)
     return student.result_blocks(assessment, questions, results, score, maximum, overall,
-                                 svc.settings.show_correct_answers)
+                                 svc.settings.shows_answers(assessment))
 
 
 async def send_result(bot: Bot, svc: Services, submission: dict[str, Any], blocks: list[str]) -> bool:
@@ -268,10 +273,83 @@ async def recover_grading(bot: Bot, svc: Services) -> int:
     return handled
 
 
+# ── deadlines (Stage 7) ──────────────────────────────────────────────────
+def closed_notice(row: dict[str, Any], tz) -> str:
+    """The publisher's notice (HTML) that an assessment closed at its deadline."""
+    sent, submitted = row["sent"], row["submitted"]
+    return (f"🔒 Assessment #{row['id']} — {esc(row['title'])} closed at its deadline "
+            f"({esc(deadlines.format_moment(row['deadline'], tz))}). No more answers are accepted.\n"
+            f"{submitted} of the {guidance.plural(sent, 'user')} it was sent to submitted.")
+
+
+async def close_due(bot: Bot, svc: Services) -> int:
+    """Close the assessments whose deadline has passed and tell each publisher once (the database
+    hands each closed assessment to one process). Returns how many were closed."""
+    rows = svc.db.close_due_assessments()
+    for row in rows:
+        event(log, "deadline.closed", assessment=row["id"], sent=row["sent"], submitted=row["submitted"])
+        suggestion = guidance.results_suggestion(row["id"], "See the final scores")
+        text = closed_notice(row, svc.settings.tz) + "\n👉 " + suggestion.html()
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(suggestion.button, callback_data=suggestion.callback_data)]])
+        admin_id = row["published_by"] or row["created_by"]
+        try:
+            await bot.send_message(admin_id, text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        except TelegramError as exc:
+            log.warning("Could not tell %s that assessment %s closed: %s", admin_id, row["id"], exc)
+    return len(rows)
+
+
+def reminder_message(row: dict[str, Any], tz) -> tuple[str, InlineKeyboardMarkup]:
+    """A student's reminder (HTML) and its button: Submit if they have saved answers, else the
+    questions."""
+    text = (f"⏰ <b>Reminder:</b> {esc(row['title'])} closes {deadlines.time_left(row['deadline'])} "
+            f"({esc(deadlines.format_moment(row['deadline'], tz))}), and you haven't submitted it yet.")
+    if row["saved"]:
+        text += (f"\nYou have {guidance.plural(row['saved'], 'answer message')} saved. Send more, or tap "
+                 "✅ Submit when you're finished.")
+        return text, student.draft_keyboard(row["assessment_id"])
+    text += "\nTap below to see the questions, then send your answers and tap ✅ Submit."
+    return text, InlineKeyboardMarkup([[InlineKeyboardButton("📝 Answer now", callback_data=f"show:{row['assessment_id']}")]])
+
+
+async def send_reminders(bot: Bot, svc: Services) -> int:
+    """Queue the reminders that are due and send them, each at most once. Returns how many were
+    sent or attempted."""
+    hours = svc.settings.reminder_hours
+    if hours:  # REMINDER_HOURS=0: no new reminders (ones already queued are still sent)
+        for aid in svc.db.queue_due_reminders(hours * 3600):
+            event(log, "reminder.queued", assessment=aid, students=svc.db.reminder_counts(aid).get("pending", 0))
+    attempted = 0
+    while not svc.stopping.is_set() and (row := svc.db.claim_reminder()) is not None:
+        attempted += 1
+        aid, user_id = row["assessment_id"], row["user_id"]
+        text, markup = reminder_message(row, svc.settings.tz)
+        try:
+            try:
+                await bot.send_message(user_id, text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            except RetryAfter as exc:
+                delay = exc.retry_after
+                await asyncio.sleep(delay.total_seconds() if hasattr(delay, "total_seconds") else delay)
+                await bot.send_message(user_id, text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        except Forbidden:
+            svc.db.set_user_active(user_id, False)
+            svc.db.finish_reminder(aid, user_id, "blocked")
+            event(log, "reminder.blocked", assessment=aid, user=user_id)
+        except TelegramError as exc:
+            svc.db.finish_reminder(aid, user_id, "failed", str(exc))
+            event(log, "reminder.failed", logging.WARNING, assessment=aid, user=user_id, error=str(exc))
+        else:
+            event(log, "reminder.sent", logging.DEBUG, assessment=aid, user=user_id)
+        await asyncio.sleep(SEND_DELAY)
+    return attempted
+
+
 # ── the loop ─────────────────────────────────────────────────────────────
 async def run_once(bot: Bot, svc: Services) -> None:
     """Finish everything left over. Each part is guarded so one failure does not stop the rest."""
-    for name, step in (("sending", lambda: deliver(bot, svc)),
+    for name, step in (("deadlines", lambda: close_due(bot, svc)),
+                       ("sending", lambda: deliver(bot, svc)),
+                       ("reminders", lambda: send_reminders(bot, svc)),
                        ("delivery reports", lambda: report_deliveries(bot, svc)),
                        ("grading", lambda: recover_grading(bot, svc)),
                        ("alerts", lambda: report_grading_failures(bot, svc))):

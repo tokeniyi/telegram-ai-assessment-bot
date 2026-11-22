@@ -13,7 +13,7 @@ async def publish(h):
     await h.text(ADMIN_ID, "/start")
     await h.text(STUDENT_ID, "/start")
     await h.document(ADMIN_ID, "notes.txt", MATERIAL, caption="2 questions")
-    assert h.tg.last_keyboard(ADMIN_ID) == ["pub:1", "regen:1", "del:1"]
+    assert h.tg.last_keyboard(ADMIN_ID) == ["pub:1", "regen:1", "del:1", "cmd:settings:1"]
     await h.press(ADMIN_ID, "pub:1")
 
 

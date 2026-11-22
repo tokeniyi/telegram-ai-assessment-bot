@@ -84,6 +84,12 @@ them too, so you can test the whole flow from a single account.
 - `/assessments` — list assessments and their status
 - `/results [id]` — ranking plus a CSV with per-question scores and raw answers
 - `/close <id>` — stop accepting answers
+- `/deadline <id> <when>` — close an assessment by itself at a time, e.g. `2d`, `tomorrow 17:00`,
+  `2026-11-30 17:00` (in `TIMEZONE`), or `off`. Students who have not submitted are reminded
+  `REMINDER_HOURS` (24) hours before, and you are told how many submitted once it closes.
+- `/settings <id>` — the deadline, and whether students of this assessment see reference answers and
+  may resubmit (by default `SHOW_CORRECT_ANSWERS` and `ALLOW_RESUBMISSION`); buttons change them.
+  The draft preview has a **⚙️ Settings** button.
 - `/regrade <id>` — grade submissions whose grading failed (for example, the AI provider was down)
 - `/users` — number of registered users
 - `/status` — grading waiting or failed, assessment messages queued or failed, and whether the AI
@@ -101,7 +107,8 @@ them too, so you can test the whole flow from a single account.
   "I'm done, please review my answers" brings up the **Submit** button. If a message is saved by
   mistake, tap **Undo** under it. It never reveals the reference answers of an open assessment, and it
   can discuss your latest result. `ALLOW_CHAT=false` turns this off (every typed message is then an answer).
-- `/pending` — open assessments; pick one to answer
+- `/pending` — open assessments (with their deadlines); pick one to answer. Before a deadline the bot
+  reminds you if you have not submitted, with a button to open the questions or submit what you saved.
 - `/myresults` — scores so far
 - `/cancel` — discard the answers typed so far
 
@@ -127,6 +134,7 @@ bot/ai/providers.py     Anthropic and OpenAI-compatible providers
 bot/ai/service.py       prompts, question generation, grading, reply validation
 bot/commands.py         the command registry: menus, /help, "did you mean" and suggestions
 bot/guidance.py         replies that explain a problem and suggest the next command (real ids)
+bot/deadlines.py        reading and showing deadlines (/deadline), in TIMEZONE
 bot/alerts.py           tells the admins when the AI provider is down or grading keeps failing
 bot/logs.py             logging set-up and structured log events (text or JSON lines)
 bot/handlers/           admin, user and shared Telegram handlers; uploads.py routes every file
@@ -279,4 +287,7 @@ Tesseract and EasyOCR run only where those engines are installed.
   and grading a submission also survive a restart: on start (and every 30 seconds) the bot sends the
   assessment to the students still waiting for it and grades submissions whose grading was cut off.
   A submission whose grading fails (or is cut off 3 times) is kept, and `/regrade` retries it.
+- Answers stop at the deadline itself; the assessment is marked closed, and its publisher told, within
+  30 seconds. Each reminder is sent at most once: a bot stopped just as it sends one does not repeat it.
+  Answers saved but not submitted by the deadline are not submitted automatically.
 - The bot works in private chats only; it does not post to groups or channels.

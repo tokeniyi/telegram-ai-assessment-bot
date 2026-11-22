@@ -19,6 +19,9 @@ Planned work is in [ROADMAP.md](ROADMAP.md); what was built in each phase is in
 - Several bot processes can share one database (two versions run together during a Railway
   deploy). Anything that must happen once is decided by the database (a conditional `UPDATE …
   RETURNING`, a primary key, a lease), never by in-memory state.
+- An assessment takes answers while `Database.OPEN` holds (published, deadline not passed), not just
+  `status = 'published'`. Per-assessment options are nullable columns that fall back to the bot-wide
+  settings: read them with `Settings.shows_answers` / `Settings.allows_resubmission` (Stage 7).
 
 ## Development conventions (mandatory)
 

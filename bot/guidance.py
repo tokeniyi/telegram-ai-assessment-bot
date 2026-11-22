@@ -85,7 +85,8 @@ def assessment_choices(db: Database, command: str, limit: int = 3) -> list[Sugge
     """Ready-to-use examples of `/command <id>` with ids this command can act on right now."""
     if command == "regrade":
         return regrade_suggestions(db, limit)
-    states = {"close": ("published",), "results": ("published", "closed")}[command]
+    states = {"close": ("published",), "results": ("published", "closed"), "deadline": ("draft", "published"),
+              "settings": ("draft", "published", "closed")}[command]
     rows = [a for a in db.list_assessments() if a["status"] in states][:limit]
     return [Suggestion(command, (str(a["id"]),), why=f"#{a['id']} {esc(a['title'])}") for a in rows]
 
@@ -105,7 +106,7 @@ def grading_lines(counts: dict[str, int]) -> list[str]:
 
 def student_next_steps(db: Database, settings: Settings, user_id: int, exclude: int | None = None) -> list[Suggestion]:
     """A student's next step, only when there is one: assessments still to answer."""
-    open_ = [a for a in db.open_assessments_for(user_id, include_submitted=settings.allow_resubmission)
+    open_ = [a for a in db.open_assessments_for(user_id, default_resubmission=settings.allow_resubmission)
              if a["id"] != exclude]
     if not open_:
         return []

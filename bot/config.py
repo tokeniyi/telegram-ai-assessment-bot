@@ -7,6 +7,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
@@ -71,9 +72,26 @@ class Settings:
     shutdown_grace_seconds: int = 50
     telegram_api_url: str | None = None  # a local Bot API server; None is api.telegram.org
     log_format: str = "text"           # text | json (Stage 5)
+    # Deadlines (Stage 7): the time zone deadlines are typed and shown in, and how many hours
+    # before a deadline students who have not submitted are reminded (0: no reminders).
+    timezone: str = "UTC"
+    reminder_hours: int = 24
 
     def is_admin(self, user_id: int | None) -> bool:
         return user_id is not None and user_id in self.admin_ids
+
+    @property
+    def tz(self) -> ZoneInfo:
+        return ZoneInfo(self.timezone)
+
+    # Per-assessment options (Stage 7). A column left NULL follows the bot-wide setting.
+    def shows_answers(self, assessment: dict) -> bool:
+        value = assessment.get("show_answers")
+        return self.show_correct_answers if value is None else bool(value)
+
+    def allows_resubmission(self, assessment: dict) -> bool:
+        value = assessment.get("allow_resubmission")
+        return self.allow_resubmission if value is None else bool(value)
 
 
 def _get(name: str, default: str = "") -> str:
@@ -203,6 +221,12 @@ def load_settings(env_file: Path | None = None) -> Settings:
     if log_format not in LOG_FORMATS:
         problems.append(f"LOG_FORMAT must be one of {', '.join(LOG_FORMATS)}, got {log_format!r}")
 
+    tz_name = _get("TIMEZONE", "UTC") or "UTC"
+    try:
+        ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        problems.append(f"TIMEZONE must be a time zone name such as UTC or Africa/Lagos, got {tz_name!r}")
+
     if problems:
         raise ConfigError(
             "Configuration problem(s) in .env:\n  - " + "\n  - ".join(problems)
@@ -236,4 +260,6 @@ def load_settings(env_file: Path | None = None) -> Settings:
         shutdown_grace_seconds=_int("SHUTDOWN_GRACE_SECONDS", 50, minimum=0),
         telegram_api_url=_get("TELEGRAM_API_URL").rstrip("/") or None,
         log_format=log_format,
+        timezone=tz_name,
+        reminder_hours=_int("REMINDER_HOURS", 24, minimum=0),
     )

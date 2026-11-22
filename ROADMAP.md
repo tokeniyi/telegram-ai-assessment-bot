@@ -1,6 +1,6 @@
 # Roadmap
 
-The planned order of work on the bot. Stages 1 to 4 are done and Stages 5 and 6 are in review. The
+The planned order of work on the bot. Stages 1 to 6 are done and Stage 7 is in review. The
 stages after them are proposals and can be reordered. What was built in each stage, and how it was tested,
 is in [docs/implementations](docs/implementations/README.md).
 
@@ -14,9 +14,9 @@ the proposed stages after it were renumbered (Assessment features 6 → 7, Scale
 | 2 | Each Telegram update handled once | ✅ Done ([#10](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/10)) |
 | 3 | Work that survives a restart | ✅ Done ([#12](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/12)) |
 | 4 | Safer deploys | ✅ Done ([#13](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/13)) |
-| 5 | Visibility for the admin | 🔍 In review ([#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14), [phase 05 docs](docs/implementations/phase-05/summary.md)) |
-| 6 | Command guidance | 🔍 In review ([#15](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/15), [phase 06 docs](docs/implementations/phase-06/summary.md)) |
-| 7 | Assessment features | Proposed |
+| 5 | Visibility for the admin | ✅ Done ([#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14), [phase 05 docs](docs/implementations/phase-05/summary.md)) |
+| 6 | Command guidance | ✅ Done ([#15](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/15), [phase 06 docs](docs/implementations/phase-06/summary.md)) |
+| 7 | Assessment features | 🔍 In review ([#16](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/16), [phase 07 docs](docs/implementations/phase-07/summary.md)) |
 | 8 | Scale and limits | Proposed |
 
 ---
@@ -66,11 +66,7 @@ Details: [phase 04](docs/implementations/phase-04/summary.md).
 Left for later: the Railway settings (healthcheck path, draining time) are made in the dashboard,
 and no real redeploy was verified from the development environment.
 
----
-
-## Next
-
-### Stage 5: Visibility for the admin
+### Stage 5: Visibility for the admin ([#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14))
 
 Problems used to show up only in the server logs, or when a student complained.
 
@@ -82,7 +78,7 @@ Problems used to show up only in the server logs, or when a student complained.
 
 Details: [phase 05](docs/implementations/phase-05/summary.md).
 
-### Stage 6: Command guidance
+### Stage 6: Command guidance ([#15](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/15))
 
 Users should not have to remember commands. When something fails, the bot says what went wrong in
 plain words and what to do next; when it succeeds, it suggests the next step only if there is one.
@@ -98,17 +94,25 @@ Details: [phase 06](docs/implementations/phase-06/summary.md).
 
 ---
 
+## Next
+
+### Stage 7: Assessment features ([#16](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/16))
+
+Product work, built on the reliable sending and grading of Stages 3 to 5.
+
+- `/deadline <id> <when>` (`2d`, `tomorrow 17:00`, `2026-11-30 17:00` in `TIMEZONE`, `off`). Answers
+  stop at the deadline itself; the assessment is then closed and its publisher told once.
+- Students who were sent it and have not submitted are reminded `REMINDER_HOURS` (24) before, once
+  each, with a button to open the questions or submit what they saved.
+- `/settings <id>` (also a button under the draft preview): whether students of this assessment see
+  reference answers and may resubmit. `SHOW_CORRECT_ANSWERS` and `ALLOW_RESUBMISSION` become the
+  defaults.
+
+Details: [phase 07](docs/implementations/phase-07/summary.md).
+
+---
+
 ## Proposed
-
-### Stage 7: Assessment features
-
-Product work, safer to build once Stages 3 to 5 make sending and grading reliable.
-
-- Deadlines, with assessments closing automatically.
-- Reminders to students who have not submitted before the deadline.
-- Per-assessment settings for whether students see reference answers and whether they can
-  resubmit. Both are one setting for the whole bot today (`SHOW_CORRECT_ANSWERS`,
-  `ALLOW_RESUBMISSION`).
 
 ### Stage 8: Scale and limits
 
