@@ -149,7 +149,7 @@ above do not depend on them.
 
 | Feature | Status | Docs |
 |---|---|---|
-| Study check-ins | In progress (not opened yet) | [feature-study-checkins](docs/implementations/feature-study-checkins/summary.md) |
+| Study check-ins | 🔍 In review ([#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19)) | [feature-study-checkins](docs/implementations/feature-study-checkins/summary.md) |
 
 ### Study check-ins
 

@@ -4,8 +4,8 @@
 |---|---|
 | Roadmap stage | None. This is a side feature, outside the staged roadmap ([ROADMAP.md](../../../ROADMAP.md), "Outside the stages") |
 | Branch | `claude/modest-allen-wfagwm` |
-| Pull request | Not opened yet |
-| Status | In progress |
+| Pull request | [#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19) |
+| Status | In review |
 
 ## Accomplished
 
@@ -68,8 +68,8 @@
 
 ## Final status
 
-Implemented and tested on `claude/modest-allen-wfagwm`. The PR is to be opened for review.
+Implemented and tested on `claude/modest-allen-wfagwm`. PR #19 open for review.
 
 ## Pull request
 
-Not opened yet.
+[#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19)
