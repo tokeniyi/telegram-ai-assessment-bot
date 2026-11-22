@@ -7,6 +7,7 @@ from telegram.constants import ChatType, ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, TypeHandler, filters
 
 from .. import commands
+from . import checkins
 from ..utils import esc, services
 
 PRIVATE = filters.ChatType.PRIVATE
@@ -77,8 +78,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Start with /pending to see if there is one to answer.\n\n"
         )
         guide = USER_HELP + "\n" + command_list(services(context).settings, update.effective_user.id, commands.USER)
+    markup = None
+    svc = services(context)
+    # Study check-ins are offered once to each student (the database decides which /start is first).
+    if not is_admin and svc.settings.checkin_days and svc.db.offer_checkins(update.effective_user.id):
+        question, markup = checkins.offer(svc.settings)
+        guide += question
     await update.effective_message.reply_text(
-        greeting + guide, parse_mode=ParseMode.HTML
+        greeting + guide, parse_mode=ParseMode.HTML, reply_markup=markup
     )
 
 

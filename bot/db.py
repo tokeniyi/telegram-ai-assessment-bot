@@ -152,6 +152,32 @@ CREATE INDEX IF NOT EXISTS idx_submissions_pending ON submissions(id) WHERE stat
 CREATE INDEX IF NOT EXISTS idx_questions_assessment ON questions(assessment_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_lookup ON submissions(assessment_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_draft_answers_user ON draft_answers(user_id, id);
+-- Study check-ins (a side feature, outside the staged roadmap). When a user last sent the bot
+-- anything: a check-in is not sent to someone who was just using the bot, and a reply resets the
+-- count of check-ins ignored in a row. An older version running during a deploy does not set it.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ;
+-- One row per user who was offered check-ins or chose them. Each due row is taken by one process
+-- (FOR UPDATE SKIP LOCKED) and moved to its next time in the same transaction: at most once.
+CREATE TABLE IF NOT EXISTS study_checkins (
+    user_id       BIGINT PRIMARY KEY,
+    status        TEXT NOT NULL,                  -- offered | on | off | blocked
+    next_at       TIMESTAMPTZ,                    -- when the next check-in is due (status 'on')
+    paused_until  TIMESTAMPTZ,
+    ignored       INTEGER NOT NULL DEFAULT 0,     -- check-ins in a row the user did not answer
+    last_sent_at  TIMESTAMPTZ,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_study_checkins_due ON study_checkins(next_at) WHERE status = 'on';
+-- Every check-in taken for sending, for /status. Written when it is taken, completed after sending.
+CREATE TABLE IF NOT EXISTS checkin_log (
+    id       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id  BIGINT NOT NULL,
+    sent_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    outcome  TEXT NOT NULL DEFAULT 'sent',        -- sent | failed | blocked
+    source   TEXT,                                -- ai | fallback (NULL: stopped before sending)
+    error    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_checkin_log_sent ON checkin_log(sent_at);
 """
 
 
@@ -227,10 +253,11 @@ class Database:
     # ── users ────────────────────────────────────────────────────────────
     def upsert_user(self, user_id: int, username: str | None, full_name: str | None) -> None:
         self._run(
-            """INSERT INTO users (user_id, username, full_name, is_active, joined_at)
-               VALUES (%s, %s, %s, TRUE, %s)
+            """INSERT INTO users (user_id, username, full_name, is_active, joined_at, last_active_at)
+               VALUES (%s, %s, %s, TRUE, %s, now())
                ON CONFLICT (user_id) DO UPDATE SET
-                   username = EXCLUDED.username, full_name = EXCLUDED.full_name, is_active = TRUE""",
+                   username = EXCLUDED.username, full_name = EXCLUDED.full_name, is_active = TRUE,
+                   last_active_at = now()""",
             (user_id, username, full_name, _now()),
         )
 
@@ -476,6 +503,101 @@ class Database:
         rows = self._all("SELECT status, COUNT(*) AS n FROM reminders WHERE assessment_id = %s GROUP BY status",
                          (assessment_id,))
         return {r["status"]: r["n"] for r in rows}
+
+    # ── study check-ins (side feature) ───────────────────────────────────
+    def offer_checkins(self, user_id: int) -> bool:
+        """Record that the user is offered check-ins. True only the first time, in any process."""
+        return self._one(
+            "INSERT INTO study_checkins (user_id, status) VALUES (%s, 'offered') "
+            "ON CONFLICT DO NOTHING RETURNING user_id", (user_id,)) is not None
+
+    def get_checkins(self, user_id: int) -> dict[str, Any] | None:
+        return self._one("SELECT * FROM study_checkins WHERE user_id = %s", (user_id,))
+
+    def set_checkins(self, user_id: int, status: str, next_at: datetime | None = None,
+                     paused_until: datetime | None = None) -> None:
+        """Turn the user's check-ins on (due at `next_at`), off, or pause them (on, due after the pause).
+        The count of ignored check-ins starts again: the user has just answered the bot."""
+        self._run(
+            """INSERT INTO study_checkins (user_id, status, next_at, paused_until)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (user_id) DO UPDATE SET status = EXCLUDED.status, next_at = EXCLUDED.next_at,
+                   paused_until = EXCLUDED.paused_until, ignored = 0, updated_at = now()""",
+            (user_id, status, next_at, paused_until))
+
+    def claim_checkin(self, decide, day_start: datetime) -> dict[str, Any] | None:
+        """Take the next check-in that is due, decide what to do with it, and record that decision
+        in the same transaction, so that each one is handled by one process.
+
+        `decide(row)` gets the check-in row with the user's facts (`user_active`, `last_active_at`,
+        `full_name`, and `reminded_today`: a deadline reminder was sent since `day_start`) and
+        returns (action, next_at, ignored). "send" logs it as sent before it is sent (at most once:
+        a process stopping right after this loses that one check-in); "blocked" stops check-ins to
+        a user who blocked the bot; any other action only moves `next_at`. Returns the row with
+        `action` and, for "send", `log_id`; None if nothing is due.
+        """
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """SELECT c.*, COALESCE(u.is_active, FALSE) AS user_active, u.last_active_at, u.full_name,
+                          EXISTS (SELECT 1 FROM reminders r WHERE r.user_id = c.user_id AND r.status = 'sent'
+                                  AND r.sent_at >= %s) AS reminded_today
+                   FROM study_checkins c LEFT JOIN users u ON u.user_id = c.user_id
+                   WHERE c.status = 'on' AND c.next_at <= now()
+                   ORDER BY c.next_at, c.user_id LIMIT 1 FOR UPDATE OF c SKIP LOCKED""",
+                (day_start,),
+            ).fetchone()
+            if row is None:
+                return None
+            action, next_at, ignored = decide(row)
+            row = {**row, "action": action, "next_at": next_at, "ignored": ignored, "log_id": None}
+            if action == "blocked":
+                conn.execute("UPDATE study_checkins SET status = 'blocked', next_at = NULL, updated_at = now() "
+                             "WHERE user_id = %s", (row["user_id"],))
+            elif action == "send":
+                conn.execute("UPDATE study_checkins SET next_at = %s, ignored = %s, last_sent_at = now(), "
+                             "paused_until = NULL, updated_at = now() WHERE user_id = %s",
+                             (next_at, ignored, row["user_id"]))
+                row["log_id"] = conn.execute("INSERT INTO checkin_log (user_id) VALUES (%s) RETURNING id",
+                                             (row["user_id"],)).fetchone()["id"]
+            else:
+                conn.execute("UPDATE study_checkins SET next_at = %s, updated_at = now() WHERE user_id = %s",
+                             (next_at, row["user_id"]))
+            return row
+
+    def finish_checkin(self, log_id: int, user_id: int, outcome: str, source: str | None,
+                       error: str | None = None) -> None:
+        """Record how a check-in went: 'sent', 'failed', or 'blocked' (no more check-ins to them)."""
+        with self._pool.connection() as conn:
+            conn.execute("UPDATE checkin_log SET outcome = %s, source = %s, error = %s WHERE id = %s",
+                         (outcome, source, error, log_id))
+            if outcome == "blocked":
+                conn.execute("UPDATE study_checkins SET status = 'blocked', next_at = NULL, updated_at = now() "
+                             "WHERE user_id = %s", (user_id,))
+
+    def prune_checkin_log(self, older_than_days: float) -> int:
+        with self._pool.connection() as conn:
+            return conn.execute("DELETE FROM checkin_log WHERE sent_at < now() - make_interval(days => %s)",
+                                (older_than_days,)).rowcount
+
+    def checkin_overview(self, days: int = 7) -> dict[str, Any]:
+        """For /status: who receives check-ins, and how the ones of the last `days` days went."""
+        people = self._one(
+            """SELECT COUNT(*) FILTER (WHERE status = 'on') AS receiving,
+                      COUNT(*) FILTER (WHERE status = 'on' AND paused_until > now()) AS paused,
+                      COUNT(*) FILTER (WHERE status = 'offered') AS undecided,
+                      COUNT(*) FILTER (WHERE status = 'off') AS declined,
+                      COUNT(*) FILTER (WHERE status = 'blocked') AS blocked
+               FROM study_checkins""")
+        sent = self._one(
+            """SELECT COUNT(*) FILTER (WHERE outcome = 'sent') AS sent,
+                      COUNT(*) FILTER (WHERE outcome = 'sent' AND source = 'ai') AS by_ai,
+                      COUNT(*) FILTER (WHERE outcome = 'sent' AND source = 'fallback') AS fallback,
+                      COUNT(*) FILTER (WHERE outcome = 'failed') AS failed,
+                      COUNT(*) FILTER (WHERE outcome = 'blocked') AS blocked_now
+               FROM checkin_log WHERE sent_at > now() - make_interval(days => %s)""", (days,))
+        error = self._one("SELECT error FROM checkin_log WHERE outcome = 'failed' AND error IS NOT NULL "
+                          "ORDER BY id DESC LIMIT 1")
+        return {**people, **sent, "error": error["error"] if error else None, "days": days}
 
     # ── deliveries: the published assessment, sent to each user once ────
     def claim_delivery(self, lease_seconds: float, assessment_id: int | None = None) -> dict[str, Any] | None:

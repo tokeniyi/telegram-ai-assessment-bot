@@ -78,6 +78,10 @@ class Settings:
     reminder_hours: int = 24
     # Stage 8: how many times the bot retries failed grading by itself once the AI answers (0: never).
     auto_regrade_attempts: int = 3
+    # Study check-ins (side feature): days between two check-ins for a student who opted in
+    # (0: switched off) and the hour of the day, in `timezone`, they are sent at.
+    checkin_days: int = 3
+    checkin_hour: int = 17
 
     def is_admin(self, user_id: int | None) -> bool:
         return user_id is not None and user_id in self.admin_ids
@@ -229,6 +233,10 @@ def load_settings(env_file: Path | None = None) -> Settings:
     except (ZoneInfoNotFoundError, ValueError):
         problems.append(f"TIMEZONE must be a time zone name such as UTC or Africa/Lagos, got {tz_name!r}")
 
+    checkin_hour = _int("CHECKIN_HOUR", 17, minimum=0)
+    if checkin_hour > 23:
+        problems.append(f"CHECKIN_HOUR is an hour of the day from 0 to 23, got {checkin_hour}")
+
     if problems:
         raise ConfigError(
             "Configuration problem(s) in .env:\n  - " + "\n  - ".join(problems)
@@ -265,4 +273,6 @@ def load_settings(env_file: Path | None = None) -> Settings:
         timezone=tz_name,
         reminder_hours=_int("REMINDER_HOURS", 24, minimum=0),
         auto_regrade_attempts=_int("AUTO_REGRADE_ATTEMPTS", 3, minimum=0),
+        checkin_days=_int("CHECKIN_DAYS", 3, minimum=0),
+        checkin_hour=checkin_hour,
     )

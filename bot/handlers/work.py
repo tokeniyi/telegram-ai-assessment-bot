@@ -14,6 +14,9 @@ Both are driven from rows in PostgreSQL rather than from the handler that starte
   hands it to one process to tell the publisher. Reminders are rows like deliveries, queued once per
   assessment and taken one at a time; each is marked sent before it is sent (at most once).
 
+* Study check-ins (side feature, bot/checkins.py): each due check-in is taken by one process and
+  moved to its next time in the same transaction, then written by the AI and sent (at most once).
+
 `run_forever` runs on start and then every WORK_INTERVAL seconds, so leftovers are picked up
 without an admin doing anything. The handlers call the same functions for the work they start.
 
@@ -30,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -37,7 +41,7 @@ from telegram.constants import ParseMode
 from telegram.error import Forbidden, RetryAfter, TelegramError, TimedOut
 from telegram.ext import Application
 
-from .. import deadlines, guidance
+from .. import checkins, deadlines, guidance
 from ..ai import AIError
 from ..alerts import report_grading_failures, report_regraded
 from ..commands import Suggestion
@@ -56,6 +60,8 @@ MAX_GRADING_ATTEMPTS = 3     # grading runs that may be cut short before a submi
 RESULT_GRACE = 300           # seconds a graded result may stay unsent before another process sends it
 AUTO_REGRADE_DELAY = 300     # seconds after a failure before the bot retries it (doubled each retry)
 AUTO_REGRADE_PER_PASS = 5    # failed submissions retried per background pass, to spare the AI's limits
+CHECKINS_PER_PASS = 10       # check-ins written and sent per pass (one AI call each), so that a pass stays short
+CHECKIN_LOG_DAYS = 90        # how long /status's record of sent check-ins is kept
 
 
 def grading_lease(services: Services) -> float:
@@ -382,6 +388,55 @@ async def send_reminders(bot: Bot, svc: Services) -> int:
     return attempted
 
 
+# ── study check-ins (side feature; bot/checkins.py) ──────────────────────
+def checkin_markup(svc: Services, user_id: int) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(s.button, callback_data=s.callback_data)]
+            for s in guidance.student_next_steps(svc.db, svc.settings, user_id) if s.button]
+    rows.append([InlineKeyboardButton("⏸ Pause a week", callback_data="chk:pause")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def send_checkins(bot: Bot, svc: Services) -> int:
+    """Send the check-ins that are due, each at most once (Database.claim_checkin), up to
+    CHECKINS_PER_PASS. Returns how many were sent or attempted."""
+    settings = svc.settings
+    if not settings.checkin_days:  # switched off: none are sent; choices are kept for when it is on again
+        return 0
+    svc.db.prune_checkin_log(CHECKIN_LOG_DAYS)
+    attempted = 0
+    # Put-off check-ins move to a later time, so this ends; the bound is only a safeguard.
+    for _ in range(20 * CHECKINS_PER_PASS):
+        if svc.stopping.is_set() or attempted >= CHECKINS_PER_PASS:
+            break
+        now = datetime.now(timezone.utc)
+        row = svc.db.claim_checkin(lambda r: checkins.decide(r, now, settings), checkins.day_start(now, settings.tz))
+        if row is None:
+            break
+        user_id = row["user_id"]
+        if row["action"] != "send":
+            event(log, "checkin.skipped", logging.DEBUG, user=user_id, reason=row["action"])
+            continue
+        attempted += 1
+        text, source = await checkins.compose(svc, user_id, row["full_name"])
+        html = checkins.message_html(text)
+        try:
+            await bot.send_message(user_id, html, parse_mode=ParseMode.HTML, reply_markup=checkin_markup(svc, user_id))
+        except Forbidden:
+            svc.db.set_user_active(user_id, False)
+            svc.db.finish_checkin(row["log_id"], user_id, "blocked", source)
+            event(log, "checkin.blocked", user=user_id)
+        except TelegramError as exc:  # not retried: a check-in is not worth a duplicate
+            svc.db.finish_checkin(row["log_id"], user_id, "failed", source, str(exc))
+            event(log, "checkin.failed", logging.WARNING, user=user_id, error=str(exc))
+        else:
+            svc.db.finish_checkin(row["log_id"], user_id, "sent", source)
+            # In the chat history, so that the AI knows what the student's reply answers.
+            svc.db.append_chat_history(user_id, [("Assistant", text)], keep=2 * settings.chat_history_turns)
+            event(log, "checkin.sent", user=user_id, source=source, ignored=row["ignored"], next=row["next_at"].isoformat())
+        await asyncio.sleep(SEND_DELAY)
+    return attempted
+
+
 # ── the loop ─────────────────────────────────────────────────────────────
 async def run_once(bot: Bot, svc: Services) -> None:
     """Finish everything left over. Each part is guarded so one failure does not stop the rest."""
@@ -391,6 +446,7 @@ async def run_once(bot: Bot, svc: Services) -> None:
                        ("delivery reports", lambda: report_deliveries(bot, svc)),
                        ("grading", lambda: recover_grading(bot, svc)),
                        ("automatic regrading", lambda: auto_regrade(bot, svc)),
+                       ("check-ins", lambda: send_checkins(bot, svc)),
                        ("alerts", lambda: report_grading_failures(bot, svc))):
         try:
             await step()

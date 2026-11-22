@@ -86,6 +86,10 @@ COMMANDS: dict[str, Command] = {c.name: c for c in (
             args=(Arg("question", "text", required=False, example="what is osmosis?"),),
             example="/explain what is osmosis?", invocations=("command", "reply", "caption"),
             feature="allow_explain"),
+    # Study check-ins (side feature). Its buttons are chk:on|off|pause (bot/handlers/checkins.py).
+    Command("checkins", "Study check-ins: on, off or pause",
+            args=(Arg("choice", "text", required=False, example="off"),), example="/checkins off",
+            feature="checkin_days"),
     Command("help", "How to use the bot", button=True),
     Command("myid", "Show your Telegram ID", menu=False),
     # ── administrators ──

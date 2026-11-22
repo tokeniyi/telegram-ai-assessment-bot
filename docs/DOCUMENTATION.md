@@ -257,6 +257,7 @@ check that the report does not say the AI could not look at the pages.
 | Everyone | `/start`, `/help`, `/myid` | Register, help, show your Telegram ID |
 | User | `/pending`, `/myresults`, `/cancel` | Open assessments, scores, discard typed answers |
 | User | `/explain` | Explain a photo, file, replied message or question |
+| User | `/checkins [on\|off\|pause]` | Study check-ins, offered once at `/start` (side feature, [docs](implementations/feature-study-checkins/summary.md)) |
 | User | *(just type)* | Chat with the AI, send answers, or say you are done to get a Submit button |
 | Admin | `/generate` | Reply to a message, file or photo to use it as material |
 | Admin | `/assessments`, `/results [id]`, `/close <id>`, `/regrade <id>`, `/users`, `/status` | Manage and review |
@@ -286,6 +287,7 @@ Added by PR #3: `ALLOW_CHAT`, `CHAT_HISTORY_TURNS`. The rest were added by PR #2
 | `SHOW_CORRECT_ANSWERS` / `ALLOW_RESUBMISSION` | `true` / `false` | Defaults; `/settings <id>` overrides them per assessment (Stage 7) |
 | `TIMEZONE` | `UTC` | Time zone deadlines are typed and shown in (Stage 7) |
 | `AUTO_REGRADE_ATTEMPTS` | 3 | Times the bot retries failed grading by itself once the AI answers; 0 for none (Stage 8) |
+| `CHECKIN_DAYS` / `CHECKIN_HOUR` | 3 / 17 | Days between study check-ins (0 switches them off) and the hour they are sent, in `TIMEZONE` (side feature) |
 | `REMINDER_HOURS` | 24 | Hours before a deadline to remind students who have not submitted; 0 for none (Stage 7) |
 
 ## 6. Dependencies

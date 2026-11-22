@@ -115,6 +115,12 @@ them too, so you can test the whole flow from a single account.
   reminds you if you have not submitted, with a button to open the questions or submit what you saved.
 - `/myresults` — scores so far
 - `/cancel` — discard the answers typed so far
+- `/checkins [on|off|pause]` — study check-ins. With your first `/start` the bot asks whether you
+  want them. If you say yes, it sends you a short AI-written message every `CHECKIN_DAYS` (3) days at
+  `CHECKIN_HOUR` (17:00, in `TIMEZONE`). The message suggests something to review and invites you
+  to reply if you're stuck. A reply goes to the chat like any other message. `pause` stops them for
+  a week. The bot sends them less often if you don't answer, and skips a day when you just used the
+  bot or got a deadline reminder.
 
 **Guidance.** You don't need to remember the commands. A mistyped command gets "did you mean"
 with the closest commands you may use. When a command cannot do what you asked, the reply says why
@@ -139,6 +145,7 @@ bot/ai/service.py       prompts, question generation, grading, reply validation
 bot/commands.py         the command registry: menus, /help, "did you mean" and suggestions
 bot/guidance.py         replies that explain a problem and suggest the next command (real ids)
 bot/deadlines.py        reading and showing deadlines (/deadline), in TIMEZONE
+bot/checkins.py         study check-ins: when they are due, and what the AI is told about the student
 bot/alerts.py           tells the admins when the AI provider is down or grading keeps failing
 bot/logs.py             logging set-up and structured log events (text or JSON lines)
 bot/handlers/           admin, user and shared Telegram handlers; uploads.py routes every file

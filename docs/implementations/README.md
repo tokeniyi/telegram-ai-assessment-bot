@@ -1,6 +1,6 @@
 # Implementation history
 
-One folder per implementation phase. Each phase matches a stage in [ROADMAP.md](../../ROADMAP.md)
+One folder per implementation phase (and per side feature, below). Each phase matches a stage in [ROADMAP.md](../../ROADMAP.md)
 and has its own branch and pull request. New phases follow [TEMPLATE.md](TEMPLATE.md); the rules
 are in [CLAUDE.md](../../CLAUDE.md).
 
@@ -14,6 +14,15 @@ are in [CLAUDE.md](../../CLAUDE.md).
 | 06 | Command guidance | `claude/stage-6-command-guidance` | [#15](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/15) | Merged | [overview](phase-06/overview.md) · [implementation](phase-06/implementation.md) · [issues](phase-06/issues-and-fixes.md) · [testing](phase-06/testing.md) · [summary](phase-06/summary.md) |
 | 07 | Assessment features | `claude/stoic-babbage-iym3c3` | [#16](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/16) | Merged | [overview](phase-07/overview.md) · [implementation](phase-07/implementation.md) · [issues](phase-07/issues-and-fixes.md) · [testing](phase-07/testing.md) · [summary](phase-07/summary.md) |
 | 08 | Recovery without the admin | `claude/stoic-babbage-iym3c3` | [#17](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/17) | Merged | [overview](phase-08/overview.md) · [implementation](phase-08/implementation.md) · [issues](phase-08/issues-and-fixes.md) · [testing](phase-08/testing.md) · [summary](phase-08/summary.md) |
+
+## Outside the stages
+
+Side features the user asked for outside the roadmap ([ROADMAP.md](../../ROADMAP.md), "Outside the
+stages"). They use the same five files.
+
+| Feature | Topic | Branch | PR | Status | Docs |
+|---|---|---|---|---|---|
+| Study check-ins | AI-written check-ins every few days for students who opt in | `claude/modest-allen-wfagwm` | [#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19) | In review | [overview](feature-study-checkins/overview.md) · [implementation](feature-study-checkins/implementation.md) · [issues](feature-study-checkins/issues-and-fixes.md) · [testing](feature-study-checkins/testing.md) · [summary](feature-study-checkins/summary.md) |
 
 ## Before the staged roadmap
 

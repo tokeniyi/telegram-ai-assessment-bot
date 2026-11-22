@@ -134,3 +134,29 @@ Protects the free AI tier and the server's memory as the number of users grows.
 - Per-user rate limits on AI calls (chat, `/explain`, grading).
 - A cap on how many OCR jobs run at once across users.
 - A sending speed that respects Telegram's limits for large classes.
+
+---
+
+## Outside the stages
+
+Side features the user asked for outside the staged plan. They are documented like phases, in
+[docs/implementations](docs/implementations/README.md), but have no stage number, and the stages
+above do not depend on them.
+
+| Feature | Status | Docs |
+|---|---|---|
+| Study check-ins | 🔍 In review ([#19](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/19)) | [feature-study-checkins](docs/implementations/feature-study-checkins/summary.md) |
+
+### Study check-ins
+
+Added on 2026-11-22 at the user's request. The bot writes to students between assessments, not only
+about them.
+
+- Students are offered check-ins once, at `/start`, and choose with `/checkins on|off|pause`.
+- A student who says yes gets a short AI-written message every `CHECKIN_DAYS` (3) days at
+  `CHECKIN_HOUR`. It suggests something to review: an assessment still open, a question they lost
+  points on, or something they asked. It also invites them to reply if they are stuck.
+- If the AI is down, a built-in message is sent instead.
+- Each check-in is sent at most once, even with two processes. `/status` shows how they went.
+
+Later: once study-session memory exists, it becomes one more source of facts for the AI.

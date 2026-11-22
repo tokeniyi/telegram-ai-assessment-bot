@@ -692,6 +692,27 @@ def _uptime(seconds: float) -> str:
     return f"{hours} h {minutes} min" if hours < 48 else f"{hours // 24} days"
 
 
+def checkin_lines(svc) -> list[str]:
+    """The study check-ins part of /status (side feature)."""
+    if not svc.settings.checkin_days:
+        return ["Switched off (CHECKIN_DAYS=0)"]
+    c = svc.db.checkin_overview()
+    lines = [f"👥 {c['receiving']} student(s) receive them" + (f", {c['paused']} paused" if c["paused"] else "")
+             + f" · {c['declined']} said no · {c['undecided']} not answered yet"]
+    if c["sent"]:
+        line = f"📨 {c['sent']} sent in the last {c['days']} days"
+        if c["fallback"]:
+            line += f" ({c['fallback']} built-in, because the AI was unavailable)"
+        lines.append(line)
+    if c["failed"]:
+        lines.append(f"❌ {c['failed']} could not be sent")
+        if c["error"]:
+            lines.append(f"   Latest error: {esc(c['error'])}")
+    if c["blocked"]:
+        lines.append(f"🚫 {c['blocked']} stopped because the student blocked the bot")
+    return lines
+
+
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """What needs the admin's attention: grading, sending, and the AI provider."""
     if not await _require_admin(update, context):
@@ -733,6 +754,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if overview["blocked_users"]:
         sending.append(f"🚫 {overview['blocked_users']} user(s) have blocked the bot")
     lines += sending or ["✅ Nothing queued or failed"]
+    lines += ["", "<b>Study check-ins</b>", *checkin_lines(svc)]
 
     # Only what needs the admin: failed grading, and messages that could not be sent.
     body, markup = guidance.render(svc.settings, update.effective_user.id, "\n".join(lines),
