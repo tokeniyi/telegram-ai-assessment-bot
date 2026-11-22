@@ -1,5 +1,6 @@
 """Offline test doubles: a fake Telegram API and a fake AI provider."""
 
+import asyncio
 import json
 import os
 import re
@@ -60,6 +61,16 @@ class FakeProvider:
         self.calls = []
         self.replies = []  # queued raw replies; falls back to the canned JSON
         self.error = None
+        self.check_error = None  # raised by check(), the /status probe
+        self.check_delay = 0.0
+        self.checks = 0
+
+    async def check(self):
+        self.checks += 1
+        await asyncio.sleep(self.check_delay)
+        if self.check_error:
+            raise self.check_error
+        return "reachable"
 
     async def complete(self, system, user):
         self.calls.append((system, user))

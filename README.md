@@ -55,7 +55,7 @@ Variables set in the real environment take priority over the file.
 | `AI_BASE_URL` | only for `custom` | URL of any OpenAI-compatible API |
 
 `.env.example` lists the remaining optional settings (question counts, file size limit,
-whether users see reference answers, resubmission, OCR, database path, log level).
+whether users see reference answers, resubmission, OCR, database path, log level and format).
 
 **About the free Kilo model:** `kilo-auto/free` costs nothing, but Kilo decides which free model
 answers each request, so question and grading quality can vary between requests, and free models
@@ -86,6 +86,8 @@ them too, so you can test the whole flow from a single account.
 - `/close <id>` — stop accepting answers
 - `/regrade <id>` — grade submissions whose grading failed (for example, the AI provider was down)
 - `/users` — number of registered users
+- `/status` — grading waiting or failed, assessment messages queued or failed, and whether the AI
+  provider answers right now (see [Monitoring](#monitoring))
 
 **User**
 
@@ -116,6 +118,8 @@ bot/extract.py          PDF / DOCX / text extraction for files that have a text 
 bot/ocr/                OCR pipeline for scanned PDFs and images (see below)
 bot/ai/providers.py     Anthropic and OpenAI-compatible providers
 bot/ai/service.py       prompts, question generation, grading, reply validation
+bot/alerts.py           tells the admins when the AI provider is down or grading keeps failing
+bot/logs.py             logging set-up and structured log events (text or JSON lines)
 bot/handlers/           admin, user and shared Telegram handlers; uploads.py routes every file
                         and photo, reading.py downloads and reads them, explain.py is /explain,
                         chat.py routes typed messages (chat, answer or review),
@@ -234,6 +238,23 @@ database first) and give every test its own temporary schema, which is dropped a
 real damage (rotated, tilted, shadowed, blurred, noisy, low resolution, heavily compressed, two
 columns, tables, scanned and mixed PDFs) and check what the pipeline reads from them. Tests for
 Tesseract and EasyOCR run only where those engines are installed.
+
+## Monitoring
+
+- **`/status`** (admins) answers from the database, so it covers every running bot process. It
+  checks the AI provider by listing its models, which uses no tokens, and shows how the latest
+  real requests went.
+- **Alerts.** After 3 AI requests in a row fail to reach the provider (network, error status, rate
+  limit, rejected key), the admins get one 🚨 message, and one ✅ message when a request gets
+  through again, listing what waits for `/regrade`. A reply that arrives but cannot be used does
+  not count as an outage. The first grading failure is reported at once. Later failures are
+  reported together, at most every 15 minutes, and held during an outage (the ✅ message reports
+  them).
+- **Logs.** Sending, grading, results, OCR and AI requests write one event per line, e.g.
+  `grading.failed submission=12 assessment=3 user=42 attempt=1 seconds=4.2 error="…"`. With
+  `LOG_FORMAT=json` each line is a JSON object, and Railway's log explorer can filter on any field
+  (`@event:grading.failed`, `@assessment:3`, `@level:error`). Logs go to stdout. Events carry ids,
+  counts, timings and error messages, never answers or document text.
 
 ## Limits
 

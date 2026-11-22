@@ -18,6 +18,7 @@ from telegram.ext import (
 )
 
 from ..ai import AIError
+from ..alerts import report_grading_failures
 from ..utils import esc, num, percent, question_blocks, send_blocks, services, total_points
 from . import explain, work
 from .reading import echo_block, is_image, read_upload
@@ -201,14 +202,9 @@ async def on_answer_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await context.bot.send_chat_action(user.id, ChatAction.TYPING)
         try:
             blocks = await work.grade(svc, submission_id)
-        except AIError as exc:
-            log.error("Grading failed for submission %s: %s", submission_id, exc)
+        except AIError:  # logged by work.grade
             await context.bot.send_message(user.id, work.GRADING_DELAYED)
-            await work.notify_admins(
-                context.bot, svc,
-                f"⚠️ Grading failed for a submission to assessment #{assessment_id}: {exc}\n"
-                f"Run /regrade {assessment_id} to retry.",
-            )
+            await report_grading_failures(context.bot, svc)  # at once, or batched with others
             return
         if blocks is not None:
             await work.send_result(context.bot, svc, svc.db.get_submission(submission_id), blocks)

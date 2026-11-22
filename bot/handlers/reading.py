@@ -11,6 +11,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from ..extract import ExtractionError
+from ..logs import event
 from ..ocr import DocumentResult, describe_result
 from ..ocr.detector import file_kind
 from ..utils import esc, services
@@ -123,6 +124,7 @@ async def read_upload(
     context.user_data["reading"] = True
     note = ProgressNote(context.bot, chat_id)
     max_pages = svc.settings.ocr.max_pages if svc.settings.is_admin(user_id) else svc.settings.ocr.max_pages_user
+    started = time.monotonic()
     try:
         files = [await _download(m, svc.settings.max_file_mb) for m in messages]
         if len(files) == 1:
@@ -133,17 +135,28 @@ async def read_upload(
             document = await svc.ocr.extract_images([data for _, data, _ in files], progress=note.update,
                                                     max_pages=max_pages, force_vision=force_vision)
     except ExtractionError as exc:
+        event(log, "ocr.failed", logging.WARNING, user=user_id, files=len(messages),
+              seconds=time.monotonic() - started, error=str(exc))
         await note.finish(None)
         await context.bot.send_message(chat_id, f"❌ {exc}")
         return None
     except TelegramError as exc:
+        event(log, "ocr.download_failed", logging.WARNING, user=user_id, error=str(exc))
         await note.finish(None)
         await context.bot.send_message(chat_id, f"❌ Could not download the file: {exc}")
         return None
     finally:
         context.user_data["reading"] = False
     if document.used_ocr:
-        log.info("OCR for user %s: %s", user_id, document.report())
+        pages = document.pages
+        confidence = document.confidence
+        event(log, "ocr.finished", user=user_id, kind=document.kind, pages=len(pages),
+              ocr_pages=sum(p.source == "ocr" for p in pages), vision_pages=sum(p.source == "vision" for p in pages),
+              corrected_pages=sum(bool(p.corrected) for p in pages),
+              engines=",".join(sorted({p.engine for p in pages if p.engine})) or None,
+              confidence=None if confidence is None else round(confidence, 3),
+              chars=len(document.text), warnings=len(document.warnings), seconds=time.monotonic() - started)
+        log.debug("OCR pages for user %s: %s", user_id, document.report())
     await note.finish(summary(document))
     return document
 

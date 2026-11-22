@@ -42,7 +42,8 @@ ADMIN_HELP = (
     "/results [id] — View grades and download CSV (latest by default)\n"
     "/close &lt;id&gt; — Close an assessment to new answers\n"
     "/regrade &lt;id&gt; — Retry failed grading\n"
-    "/users — Check registered user count"
+    "/users — Check registered user count\n"
+    "/status — Grading, sending and AI provider health"
 )
 
 
