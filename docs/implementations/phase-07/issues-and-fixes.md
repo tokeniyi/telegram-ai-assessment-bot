@@ -4,8 +4,8 @@
 |---|---|
 | Roadmap stage | Stage 7 in [ROADMAP.md](../../../ROADMAP.md) |
 | Branch | `claude/stoic-babbage-iym3c3` |
-| Pull request | not opened yet |
-| Status | In progress |
+| Pull request | [#16](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/16) |
+| Status | In review |
 
 ### 1. "2d" was shown as "in 1 day 23 h"
 - **Symptom:** `test_deadline_on_a_draft_is_shown_to_students_when_published` failed. The reply to

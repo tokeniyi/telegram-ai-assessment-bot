@@ -16,7 +16,7 @@ the proposed stages after it were renumbered (Assessment features 6 → 7, Scale
 | 4 | Safer deploys | ✅ Done ([#13](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/13)) |
 | 5 | Visibility for the admin | ✅ Done ([#14](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/14), [phase 05 docs](docs/implementations/phase-05/summary.md)) |
 | 6 | Command guidance | ✅ Done ([#15](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/15), [phase 06 docs](docs/implementations/phase-06/summary.md)) |
-| 7 | Assessment features | 🔍 In review ([phase 07 docs](docs/implementations/phase-07/summary.md)) |
+| 7 | Assessment features | 🔍 In review ([#16](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/16), [phase 07 docs](docs/implementations/phase-07/summary.md)) |
 | 8 | Scale and limits | Proposed |
 
 ---
@@ -96,7 +96,7 @@ Details: [phase 06](docs/implementations/phase-06/summary.md).
 
 ## Next
 
-### Stage 7: Assessment features
+### Stage 7: Assessment features ([#16](https://github.com/tokeniyi/telegram-ai-assessment-bot/pull/16))
 
 Product work, built on the reliable sending and grading of Stages 3 to 5.
 
